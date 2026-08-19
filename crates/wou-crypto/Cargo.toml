@@ -1,0 +1,24 @@
+[package]
+name = "wou-crypto"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+wou-core = { path = "../wou-core" }
+jsonwebtoken = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+sha3 = { workspace = true }
+hex = { workspace = true }
+bs58 = { workspace = true }
+k256 = { workspace = true }
+ed25519-dalek = { workspace = true }
+reqwest = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }

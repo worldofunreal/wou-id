@@ -1,0 +1,20 @@
+/target
+**/*.rs.bk
+Cargo.lock
+
+# Environment & Secrets
+.env
+.env.local
+*.pem
+*.key
+*.db
+*.redb
+
+# IDE & OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+node_modules/
+dist/

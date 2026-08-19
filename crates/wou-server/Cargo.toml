@@ -1,0 +1,22 @@
+[package]
+name = "wou-server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+wou-core = { path = "../wou-core" }
+wou-mail = { path = "../wou-mail" }
+wou-crypto = { path = "../wou-crypto" }
+wou-storage = { path = "../wou-storage" }
+axum = { workspace = true }
+tower-http = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }

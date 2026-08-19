@@ -1,0 +1,13 @@
+{
+  "name": "@worldofunreal/id-sdk",
+  "version": "0.1.0",
+  "description": "Universal World of Unreal Identity & Progressive Auth SDK",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc"
+  },
+  "keywords": ["auth", "gaming", "web3", "identity", "otp", "stalwart", "worldofunreal"],
+  "author": "Omar Hernandez Salmeron <ohsalmeron@gmail.com>",
+  "license": "MIT"
+}
