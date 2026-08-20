@@ -1,0 +1,283 @@
+#!/usr/bin/env python3
+"""
+World of Unreal Identity (wou-id) Deployment & Operations Engine
+Pure Python CLI for building, testing, deploying, and monitoring wou-id on FreeBSD / IONOS.
+Zero external pip dependencies.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+# --- Configuration & Defaults ---
+ROOT_DIR = Path(__file__).resolve().parent
+DEPLOY_DIR = ROOT_DIR / "deploy"
+
+BUILD_HOST = os.environ.get("WOU_BUILD_HOST", "freebsd")
+PROD_HOST = os.environ.get("WOU_PROD_HOST", "ionos")
+PROD_USER = os.environ.get("WOU_PROD_USER", "sowdb")
+PROD_GROUP = os.environ.get("WOU_PROD_GROUP", "sow")
+HEALTH_URL = os.environ.get("WOU_HEALTH_URL", "https://id.worldofunreal.com/health")
+REMOTE_BUILD_DIR = "/tmp/wou-id"
+REMOTE_BIN_PATH = "/usr/local/libexec/wou-server"
+REMOTE_ENV_PATH = "/usr/local/etc/wou-id/wou-id.env"
+REMOTE_RCD_PATH = "/usr/local/etc/rc.d/wou_id"
+REMOTE_NGINX_PATH = "/usr/local/etc/nginx/conf.d/id.worldofunreal.com.conf"
+REMOTE_DB_DIR = "/var/db/wou-id"
+REMOTE_LOG_DIR = "/var/log/wou-id"
+
+# --- ANSI Colors ---
+class Colors:
+    GREEN = "\033[92m"
+    BLUE = "\033[94m"
+    CYAN = "\033[96m"
+    YELLOW = "\033[93m"
+    RED = "\033[91m"
+    BOLD = "\033[1m"
+    RESET = "\033[0m"
+
+def log_info(msg: str):
+    print(f"{Colors.BLUE}[INFO]{Colors.RESET} {msg}")
+
+def log_success(msg: str):
+    print(f"{Colors.GREEN}{Colors.BOLD}[OK]{Colors.RESET} {msg}")
+
+def log_warn(msg: str):
+    print(f"{Colors.YELLOW}[WARN]{Colors.RESET} {msg}")
+
+def log_error(msg: str):
+    print(f"{Colors.RED}{Colors.BOLD}[ERROR]{Colors.RESET} {msg}")
+
+def run_cmd(cmd: list[str] | str, check=True, capture=False, shell=False) -> subprocess.CompletedProcess:
+    if isinstance(cmd, list) and not shell:
+        cmd_str = " ".join(cmd)
+    else:
+        cmd_str = str(cmd)
+    
+    if not capture:
+        print(f"{Colors.CYAN}→ {cmd_str}{Colors.RESET}")
+    
+    result = subprocess.run(
+        cmd,
+        shell=shell,
+        check=check,
+        capture_output=capture,
+        text=True
+    )
+    return result
+
+def run_ssh(host: str, cmd_str: str, check=True, capture=False) -> subprocess.CompletedProcess:
+    return run_cmd(["ssh", host, cmd_str], check=check, capture=capture)
+
+# --- Commands ---
+
+def cmd_test(_args):
+    """Run local unit and integration tests across all workspace crates."""
+    log_info("Running workspace unit and integration tests...")
+    start_time = time.time()
+    try:
+        run_cmd(["cargo", "test", "--workspace"], check=True)
+        elapsed = time.time() - start_time
+        log_success(f"All workspace tests passed cleanly in {elapsed:.2f}s!")
+    except subprocess.CalledProcessError as e:
+        log_error(f"Tests failed with exit code {e.returncode}")
+        sys.exit(1)
+
+def cmd_build(_args):
+    """Sync workspace to FreeBSD build VM and compile optimized release binary."""
+    log_info(f"Syncing source code to FreeBSD build VM ({BUILD_HOST}:{REMOTE_BUILD_DIR})...")
+    rsync_cmd = [
+        "rsync", "-avz", "--delete",
+        "--exclude", "target",
+        "--exclude", ".git",
+        f"{ROOT_DIR}/",
+        f"{BUILD_HOST}:{REMOTE_BUILD_DIR}/"
+    ]
+    run_cmd(rsync_cmd, check=True)
+
+    log_info("Compiling release binary (wou-server) on FreeBSD 15.1 VM...")
+    build_cmd = f"cd {REMOTE_BUILD_DIR} && cargo build --release --bin wou-server"
+    run_ssh(BUILD_HOST, build_cmd, check=True)
+
+    # Verify output binary
+    verify_cmd = f"file {REMOTE_BUILD_DIR}/target/release/wou-server"
+    res = run_ssh(BUILD_HOST, verify_cmd, capture=True)
+    log_success(f"Binary compiled successfully: {res.stdout.strip()}")
+
+def cmd_deploy(args):
+    """Execute complete end-to-end deployment pipeline."""
+    start_total = time.time()
+    print(f"\n{Colors.BOLD}======================================================={Colors.RESET}")
+    print(f"{Colors.BOLD}  WORLD OF UNREAL IDENTITY (wou-id) DEPLOYMENT PIPELINE{Colors.RESET}")
+    print(f"{Colors.BOLD}======================================================={Colors.RESET}\n")
+
+    # Step 1: Preflight Tests
+    if not args.skip_tests:
+        log_info("Step 1/5: Running local preflight tests...")
+        run_cmd(["cargo", "test", "--workspace"], check=True)
+        log_success("Preflight tests passed.")
+    else:
+        log_warn("Step 1/5: Skipping tests (--skip-tests specified).")
+
+    # Step 2: Remote Compilation on FreeBSD VM
+    log_info(f"Step 2/5: Building on FreeBSD VM ({BUILD_HOST})...")
+    cmd_build(args)
+
+    # Step 3: Transfer Binary to Production
+    log_info(f"Step 3/5: Transferring binary to production host ({PROD_HOST})...")
+    scp_cmd = f"scp {BUILD_HOST}:{REMOTE_BUILD_DIR}/target/release/wou-server {PROD_HOST}:/tmp/wou-server"
+    run_cmd(scp_cmd, shell=True, check=True)
+
+    install_bin_cmd = (
+        f"sudo install -o {PROD_USER} -g {PROD_GROUP} -m 755 /tmp/wou-server {REMOTE_BIN_PATH} && "
+        f"rm /tmp/wou-server"
+    )
+    run_ssh(PROD_HOST, install_bin_cmd, check=True)
+    log_success(f"Installed binary to {REMOTE_BIN_PATH}")
+
+    # Step 4: Provision / Sync Configurations
+    log_info("Step 4/5: Syncing versioned infrastructure configurations...")
+    
+    # Sync rc.d script
+    rcd_local = DEPLOY_DIR / "wou_id.rc.d"
+    if rcd_local.exists():
+        run_cmd(f"scp {rcd_local} {PROD_HOST}:/tmp/wou_id.rc.d", shell=True, check=True)
+        run_ssh(PROD_HOST, f"sudo install -o root -g wheel -m 755 /tmp/wou_id.rc.d {REMOTE_RCD_PATH} && rm /tmp/wou_id.rc.d")
+        run_ssh(PROD_HOST, "sudo sysrc wou_id_enable=YES")
+
+    # Sync Nginx configuration
+    nginx_local = DEPLOY_DIR / "id.worldofunreal.com.conf"
+    if nginx_local.exists():
+        run_cmd(f"scp {nginx_local} {PROD_HOST}:/tmp/id.worldofunreal.com.conf", shell=True, check=True)
+        run_ssh(PROD_HOST, f"sudo install -o root -g wheel -m 644 /tmp/id.worldofunreal.com.conf {REMOTE_NGINX_PATH} && rm /tmp/id.worldofunreal.com.conf")
+        run_ssh(PROD_HOST, "sudo nginx -t && sudo service nginx reload")
+
+    # Step 5: Restart Service & Verify Health
+    log_info("Step 5/5: Restarting service and verifying health...")
+    run_ssh(PROD_HOST, "sudo service wou_id restart", check=True)
+    time.sleep(1)
+
+    # Health check verification
+    try:
+        # Check via public endpoint or local resolve
+        health_req = run_ssh(PROD_HOST, "curl -s http://127.0.0.1:25570/health", capture=True)
+        if "200 OK" in health_req.stdout or "Online" in health_req.stdout:
+            log_success(f"Health check verified on localhost: {health_req.stdout.strip()}")
+        else:
+            log_warn(f"Unexpected health response: {health_req.stdout}")
+    except Exception as e:
+        log_error(f"Health verification failed: {e}")
+        sys.exit(1)
+
+    elapsed_total = time.time() - start_total
+    print(f"\n{Colors.GREEN}{Colors.BOLD}======================================================={Colors.RESET}")
+    print(f"{Colors.GREEN}{Colors.BOLD}  DEPLOYMENT SUCCESSFUL in {elapsed_total:.2f}s! 🚀{Colors.RESET}")
+    print(f"{Colors.GREEN}{Colors.BOLD}  Public URL: {HEALTH_URL}{Colors.RESET}")
+    print(f"{Colors.GREEN}{Colors.BOLD}======================================================={Colors.RESET}\n")
+
+def cmd_status(_args):
+    """Check live status of wou-id, ports, and databases on production."""
+    log_info(f"Querying production status on {PROD_HOST}...")
+    print(f"\n{Colors.BOLD}--- Service Status ---{Colors.RESET}")
+    run_ssh(PROD_HOST, "sudo service wou_id status || true")
+    
+    print(f"\n{Colors.BOLD}--- Network Listeners (Port 25570) ---{Colors.RESET}")
+    run_ssh(PROD_HOST, "sudo sockstat -4l | grep 25570 || echo 'Port 25570 not bound'")
+
+    print(f"\n{Colors.BOLD}--- Storage Paths & Redb Database ---{Colors.RESET}")
+    run_ssh(PROD_HOST, f"sudo ls -lh {REMOTE_DB_DIR} /var/log/wou-id 2>/dev/null || true")
+
+    print(f"\n{Colors.BOLD}--- Valkey Database Index 1 Keys ---{Colors.RESET}")
+    run_ssh(PROD_HOST, "valkey-cli -n 1 DBSIZE 2>/dev/null || echo 'Valkey status unavailable'")
+
+    print(f"\n{Colors.BOLD}--- Health Check Endpoint ---{Colors.RESET}")
+    res = run_ssh(PROD_HOST, "curl -i http://127.0.0.1:25570/health 2>/dev/null", capture=True)
+    print(res.stdout.strip())
+
+def cmd_logs(args):
+    """Tail production logs in real time."""
+    lines = args.lines or 50
+    log_info(f"Fetching last {lines} lines of /var/log/wou-id/server.log...")
+    if args.follow:
+        run_ssh(PROD_HOST, f"sudo tail -f -n {lines} /var/log/wou-id/server.log")
+    else:
+        run_ssh(PROD_HOST, f"sudo tail -n {lines} /var/log/wou-id/server.log")
+
+def cmd_bootstrap(_args):
+    """Initialize directories and configuration on a fresh FreeBSD VPS."""
+    log_info(f"Bootstrapping fresh environment on {PROD_HOST}...")
+    bootstrap_script = f"""
+    sudo mkdir -p {REMOTE_DB_DIR} {REMOTE_LOG_DIR} /usr/local/etc/wou-id /usr/local/libexec
+    sudo chown -R {PROD_USER}:{PROD_GROUP} {REMOTE_DB_DIR} {REMOTE_LOG_DIR} /usr/local/etc/wou-id
+    sudo chmod 750 {REMOTE_DB_DIR} {REMOTE_LOG_DIR} /usr/local/etc/wou-id
+    """
+    run_ssh(PROD_HOST, bootstrap_script)
+    
+    # Sync environment template if not present
+    env_local = DEPLOY_DIR / "wou-id.env.template"
+    if env_local.exists():
+        check_env = run_ssh(PROD_HOST, f"[ -f {REMOTE_ENV_PATH} ] && echo exists || echo missing", capture=True)
+        if "missing" in check_env.stdout:
+            log_info(f"Installing default {REMOTE_ENV_PATH}...")
+            run_cmd(f"scp {env_local} {PROD_HOST}:/tmp/wou-id.env", shell=True, check=True)
+            run_ssh(PROD_HOST, f"sudo install -o {PROD_USER} -g {PROD_GROUP} -m 600 /tmp/wou-id.env {REMOTE_ENV_PATH} && rm /tmp/wou-id.env")
+            log_success(f"Created {REMOTE_ENV_PATH}")
+        else:
+            log_info(f"Existing {REMOTE_ENV_PATH} preserved.")
+
+    log_success("Bootstrap complete!")
+
+# --- CLI Entrypoint ---
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="World of Unreal Identity (wou-id) CLI & Deployment Tool"
+    )
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # test
+    subparsers.add_parser("test", help="Run workspace unit and integration tests")
+
+    # build
+    subparsers.add_parser("build", help="Compile release binary on FreeBSD VM")
+
+    # deploy
+    deploy_parser = subparsers.add_parser("deploy", help="Full automated deployment pipeline to production")
+    deploy_parser.add_argument("--skip-tests", action="store_true", help="Skip preflight unit tests")
+
+    # status
+    subparsers.add_parser("status", help="Check live production status and socket listeners")
+
+    # logs
+    logs_parser = subparsers.add_parser("logs", help="View or follow live production server logs")
+    logs_parser.add_argument("-n", "--lines", type=int, default=50, help="Number of lines to show")
+    logs_parser.add_argument("-f", "--follow", action="store_true", help="Follow log stream in real time")
+
+    # bootstrap
+    subparsers.add_parser("bootstrap", help="Initialize a fresh FreeBSD VPS environment")
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+
+    cmd_map = {
+        "test": cmd_test,
+        "build": cmd_build,
+        "deploy": cmd_deploy,
+        "status": cmd_status,
+        "logs": cmd_logs,
+        "bootstrap": cmd_bootstrap,
+    }
+
+    cmd_map[args.command](args)
+
+if __name__ == "__main__":
+    main()
