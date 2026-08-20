@@ -49,8 +49,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "465".into())
         .parse()
         .unwrap_or(465);
-    let smtp_user = std::env::var("WOU_SMTP_USER").unwrap_or_else(|_| "no-reply@worldofunreal.com".into());
-    let smtp_password = std::env::var("WOU_SMTP_PASSWORD").unwrap_or_else(|_| "ni*5lC673XuaPjDmPk3QAgqd".into());
+
+    let mut domain_passwords = std::collections::HashMap::new();
+    domain_passwords.insert(
+        "no-reply@worldofunreal.com".to_string(),
+        std::env::var("WOU_SMTP_PASS_WORLDOFUNREAL").unwrap_or_else(|_| "ni*5lC673XuaPjDmPk3QAgqd".into()),
+    );
+    domain_passwords.insert(
+        "no-reply@shadowsofwar.io".to_string(),
+        std::env::var("WOU_SMTP_PASS_SHADOWSOFWAR").unwrap_or_else(|_| "Y2JLXLF+to%FSaTFTtop&EId".into()),
+    );
+    domain_passwords.insert(
+        "no-reply@cosmicrafts.com".to_string(),
+        std::env::var("WOU_SMTP_PASS_COSMICRAFTS").unwrap_or_else(|_| "tPKfobbgaFiF#OYZJW1kg=Mn".into()),
+    );
+    domain_passwords.insert(
+        "no-reply@darkrift.ai".to_string(),
+        std::env::var("WOU_SMTP_PASS_DARKRIFT").unwrap_or_else(|_| "lT5F!GYWUFJQxabv8dYkas$A".into()),
+    );
+    domain_passwords.insert(
+        "no-reply@nftropoly.com".to_string(),
+        std::env::var("WOU_SMTP_PASS_NFTROPOLY").unwrap_or_else(|_| "qC%X4#rGWC*=c&jKyNDURB%!".into()),
+    );
 
     let otp_expiry_seconds: u64 = std::env::var("WOU_OTP_EXPIRY_SECONDS")
         .unwrap_or_else(|_| "600".into())
@@ -62,8 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mailer_config = StalwartMailerConfig {
         smtp_host,
         smtp_port,
-        smtp_user,
-        smtp_password,
+        domain_passwords,
     };
     let mailer = StalwartMailer::new(mailer_config)?;
     let jwt = Arc::new(JwtManager::new(&jwt_secret));

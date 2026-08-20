@@ -1,47 +1,85 @@
-use lettre::message::{header::ContentType, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
-use tracing::{error, info};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tracing::info;
 use wou_core::{GameContext, WouError};
 
 use crate::templates::render_otp_email;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct StalwartMailerConfig {
     pub smtp_host: String,
     pub smtp_port: u16,
-    pub smtp_user: String,
-    pub smtp_password: String,
+    pub domain_passwords: HashMap<String, String>,
 }
 
 #[derive(Clone)]
 pub struct StalwartMailer {
-    _config: StalwartMailerConfig,
-    transport: AsyncSmtpTransport<Tokio1Executor>,
+    _host: String,
+    _port: u16,
+    transports: Arc<HashMap<String, AsyncSmtpTransport<Tokio1Executor>>>,
+    default_transport: AsyncSmtpTransport<Tokio1Executor>,
 }
 
 impl StalwartMailer {
     pub fn new(config: StalwartMailerConfig) -> Result<Self, WouError> {
-        let creds = Credentials::new(config.smtp_user.clone(), config.smtp_password.clone());
+        let mut transports = HashMap::new();
 
-        // Connect via SMTPS (Port 465) or STARTTLS
-        let transport = if config.smtp_port == 465 {
+        for (sender_email, password) in &config.domain_passwords {
+            let creds = Credentials::new(sender_email.clone(), password.clone());
+            let transport = if config.smtp_port == 465 {
+                AsyncSmtpTransport::<Tokio1Executor>::relay(&config.smtp_host)
+                    .map_err(|e| WouError::MailError(format!("Failed to build SMTP relay for {sender_email}: {e}")))?
+                    .credentials(creds)
+                    .port(config.smtp_port)
+                    .build()
+            } else {
+                AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.smtp_host)
+                    .map_err(|e| WouError::MailError(format!("Failed to build StartTLS relay for {sender_email}: {e}")))?
+                    .credentials(creds)
+                    .port(config.smtp_port)
+                    .build()
+            };
+            transports.insert(sender_email.clone(), transport);
+        }
+
+        // Default fallback transport (worldofunreal.com)
+        let default_user = "no-reply@worldofunreal.com";
+        let default_pass = config
+            .domain_passwords
+            .get(default_user)
+            .cloned()
+            .unwrap_or_else(|| "ni*5lC673XuaPjDmPk3QAgqd".into());
+
+        let default_creds = Credentials::new(default_user.to_string(), default_pass);
+        let default_transport = if config.smtp_port == 465 {
             AsyncSmtpTransport::<Tokio1Executor>::relay(&config.smtp_host)
-                .map_err(|e| WouError::MailError(format!("Failed to build SMTP relay: {e}")))?
-                .credentials(creds)
+                .map_err(|e| WouError::MailError(format!("Failed to build default relay: {e}")))?
+                .credentials(default_creds)
                 .port(config.smtp_port)
                 .build()
         } else {
             AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.smtp_host)
-                .map_err(|e| WouError::MailError(format!("Failed to build StartTLS relay: {e}")))?
-                .credentials(creds)
+                .map_err(|e| WouError::MailError(format!("Failed to build default StartTLS relay: {e}")))?
+                .credentials(default_creds)
                 .port(config.smtp_port)
                 .build()
         };
 
-        info!("StalwartMailer initialized for host {}:{}", config.smtp_host, config.smtp_port);
+        info!(
+            "StalwartMailer initialized for host {}:{} with {} sender transports",
+            config.smtp_host,
+            config.smtp_port,
+            transports.len()
+        );
 
-        Ok(Self { _config: config, transport })
+        Ok(Self {
+            _host: config.smtp_host,
+            _port: config.smtp_port,
+            transports: Arc::new(transports),
+            default_transport,
+        })
     }
 
     /// Dispatch a 6-digit OTP code to a player's email address with custom game branding.
@@ -67,33 +105,27 @@ impl StalwartMailer {
             .from(from_header)
             .to(to_header)
             .subject(content.subject)
-            .multipart(
-                MultiPart::alternative()
-                    .singlepart(
-                        SinglePart::builder()
-                            .header(ContentType::TEXT_PLAIN)
-                            .body(content.text_body),
-                    )
-                    .singlepart(
-                        SinglePart::builder()
-                            .header(ContentType::TEXT_HTML)
-                            .body(content.html_body),
-                    ),
-            )
-            .map_err(|e| WouError::MailError(format!("Failed to construct email: {e}")))?;
+            .header(lettre::message::header::ContentType::TEXT_HTML)
+            .body(content.html_body)
+            .map_err(|e| WouError::MailError(format!("Failed to build email message: {e}")))?;
 
-        match self.transport.send(email).await {
-            Ok(response) => {
-                info!(
-                    "Successfully dispatched OTP email to {} via Stalwart (Code: {:?})",
-                    recipient_email, response
-                );
-                Ok(())
-            }
-            Err(e) => {
-                error!("Failed to dispatch OTP email to {}: {e}", recipient_email);
-                Err(WouError::MailError(format!("SMTP delivery error: {e}")))
-            }
-        }
+        let transport = self
+            .transports
+            .get(sender_email)
+            .unwrap_or(&self.default_transport);
+
+        transport
+            .send(email)
+            .await
+            .map_err(|e| WouError::MailError(format!("SMTP delivery error: {e}")))?;
+
+        info!(
+            "OTP code successfully dispatched to {} from {} ({})",
+            recipient_email,
+            sender_email,
+            context.display_name()
+        );
+
+        Ok(())
     }
 }
