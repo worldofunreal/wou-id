@@ -11,7 +11,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use wou_crypto::JwtManager;
+use wou_crypto::{JwtManager, OAuthManager};
 use wou_mail::{StalwartMailer, StalwartMailerConfig};
 use wou_storage::WouStorage;
 
@@ -57,7 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()
         .unwrap_or(600);
 
-    // 3. Initialize Storage & Stalwart Mailer
+    // 3. Initialize Storage, Stalwart Mailer, and OAuth Manager
     let storage = WouStorage::new(&redis_url, &redb_path)?;
     let mailer_config = StalwartMailerConfig {
         smtp_host,
@@ -67,11 +67,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let mailer = StalwartMailer::new(mailer_config)?;
     let jwt = Arc::new(JwtManager::new(&jwt_secret));
+    let oauth = Arc::new(OAuthManager::new());
 
     let state = AppState {
         storage,
         mailer,
         jwt,
+        oauth,
         otp_expiry_seconds,
     };
 
@@ -89,7 +91,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Stalwart OTP Registration & Verification
         .route("/api/v1/auth/otp/request", post(routes::otp::handle_request_otp))
         .route("/api/v1/auth/otp/verify", post(routes::otp::handle_verify_otp))
-        // Multi-Provider Linking
+        // Social Media OAuth2 Auth (Discord, Google, Twitter, Meta)
+        .route("/api/v1/auth/oauth/login/:provider", get(routes::oauth::handle_oauth_login))
+        .route("/api/v1/auth/oauth/callback/:provider", post(routes::oauth::handle_oauth_callback))
+        // External Portal & Web3 Linking
         .route("/api/v1/auth/link/crazygames", post(routes::link::handle_link_crazygames))
         .route("/api/v1/auth/link/ethereum", post(routes::link::handle_link_ethereum))
         .route("/api/v1/auth/link/solana", post(routes::link::handle_link_solana))

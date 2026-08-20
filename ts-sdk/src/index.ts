@@ -11,9 +11,14 @@ export type AuthProvider =
   | 'poki'
   | 'google'
   | 'apple'
+  | 'discord'
+  | 'twitter'
+  | 'meta'
   | 'ethereum'
   | 'solana'
   | string;
+
+export type SocialProvider = 'discord' | 'google' | 'twitter' | 'meta';
 
 export interface LinkedIdentity {
   provider: AuthProvider;
@@ -46,6 +51,13 @@ export interface AuthResponse {
 }
 
 export interface OtpVerifyResponse {
+  status: string;
+  account: PlayerAccount;
+  session_token: string;
+  is_new_account: boolean;
+}
+
+export interface OAuthCallbackResponse {
   status: string;
   account: PlayerAccount;
   session_token: string;
@@ -99,7 +111,7 @@ export class WouIdClient {
   }
 
   /**
-   * Step 1: Request 6-digit OTP code sent via Stalwart to player's email.
+   * Request 6-digit OTP code sent via Stalwart to player's email.
    */
   async requestOtp(
     email: string,
@@ -131,7 +143,7 @@ export class WouIdClient {
   }
 
   /**
-   * Step 2: Verify 6-digit OTP code, link email, and promote account to permanent.
+   * Verify 6-digit OTP code, link email, and promote account to permanent.
    */
   async verifyOtp(
     email: string,
@@ -160,6 +172,64 @@ export class WouIdClient {
     }
 
     const data: OtpVerifyResponse = await res.json();
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.setItem(this.storageKey, data.account.id);
+      window.localStorage.setItem('wou_session_token', data.session_token);
+    }
+
+    return data;
+  }
+
+  /**
+   * Redirect to Social Media Provider for login (Discord, Google, Twitter, Meta).
+   */
+  async loginWithOAuth(provider: SocialProvider, redirectUri?: string): Promise<void> {
+    const uri = redirectUri || (typeof window !== 'undefined' ? window.location.origin + '/auth/callback' : '');
+    const res = await fetch(
+      `${this.baseUrl}/api/v1/auth/oauth/login/${provider}?redirect_uri=${encodeURIComponent(uri)}`
+    );
+
+    if (!res.ok) {
+      throw new Error(`Failed to initiate ${provider} OAuth2 login`);
+    }
+
+    const { authorization_url } = await res.json();
+    if (typeof window !== 'undefined') {
+      window.location.href = authorization_url;
+    }
+  }
+
+  /**
+   * Process OAuth2 callback with authorization code returned from Discord, Google, Twitter, or Meta.
+   */
+  async handleOAuthCallback(
+    provider: SocialProvider,
+    code: string,
+    redirectUri: string,
+    context: GameContext = 'worldofunreal'
+  ): Promise<OAuthCallbackResponse> {
+    let accountId: string | null = null;
+    if (typeof window !== 'undefined' && window.localStorage) {
+      accountId = window.localStorage.getItem(this.storageKey);
+    }
+
+    const res = await fetch(`${this.baseUrl}/api/v1/auth/oauth/callback/${provider}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        code,
+        redirect_uri: redirectUri,
+        account_id: accountId || undefined,
+        context,
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'OAuth2 verification failed' }));
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
+
+    const data: OAuthCallbackResponse = await res.json();
     if (typeof window !== 'undefined' && window.localStorage) {
       window.localStorage.setItem(this.storageKey, data.account.id);
       window.localStorage.setItem('wou_session_token', data.session_token);

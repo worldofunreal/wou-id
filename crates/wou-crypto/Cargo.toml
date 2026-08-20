@@ -19,6 +19,7 @@ bs58 = { workspace = true }
 k256 = { workspace = true }
 ed25519-dalek = { workspace = true }
 reqwest = { workspace = true }
+urlencoding = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }

@@ -69,6 +69,12 @@ pub enum AuthProvider {
     Google,
     /// Apple Game Center / Apple ID
     Apple,
+    /// Discord User Account OAuth2
+    Discord,
+    /// X / Twitter Account OAuth2
+    Twitter,
+    /// Meta / Facebook Account OAuth2
+    Meta,
     /// Ethereum / EVM Wallet (EIP-4361 SIWE)
     Ethereum,
     /// Solana Wallet (SIWS)
@@ -85,6 +91,9 @@ impl AuthProvider {
             Self::Poki => "poki",
             Self::Google => "google",
             Self::Apple => "apple",
+            Self::Discord => "discord",
+            Self::Twitter => "twitter",
+            Self::Meta => "meta",
             Self::Ethereum => "ethereum",
             Self::Solana => "solana",
             Self::Custom(s) => s.as_str(),
