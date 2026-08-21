@@ -4,3 +4,4 @@ pub mod newsletter;
 pub mod oauth;
 pub mod otp;
 pub mod profile;
+pub mod web3;

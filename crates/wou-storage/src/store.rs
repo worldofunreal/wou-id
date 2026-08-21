@@ -118,6 +118,22 @@ impl WouStorage {
         Ok(pending)
     }
 
+    pub async fn save_cache_string(&self, key: &str, val: &str, ttl_seconds: u64) -> Result<(), WouError> {
+        let mut conn = self.get_redis().await?;
+        let _: () = conn
+            .set_ex(key, val, ttl_seconds)
+            .await
+            .map_err(|e| WouError::DatabaseError(format!("Redis SETEX failed: {e}")))?;
+        Ok(())
+    }
+
+    pub async fn get_cache_string(&self, key: &str) -> Result<Option<String>, WouError> {
+        let mut conn = self.get_redis().await?;
+        conn.get(key)
+            .await
+            .map_err(|e| WouError::DatabaseError(format!("Redis GET failed: {e}")))
+    }
+
     // =========================================================================
     // Durable Player Accounts & Indexing (Redb + Valkey Cache)
     // =========================================================================

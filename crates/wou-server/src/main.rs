@@ -113,6 +113,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Social Media OAuth2 Auth (Discord, Google, Twitter, Meta)
         .route("/api/v1/auth/oauth/login/:provider", get(routes::oauth::handle_oauth_login))
         .route("/api/v1/auth/oauth/callback/:provider", post(routes::oauth::handle_oauth_callback))
+        // Web3 Direct Authentication (Solana & EVM)
+        .route("/api/v1/auth/web3/challenge", post(routes::web3::handle_web3_challenge))
+        .route("/api/v1/auth/web3/verify", post(routes::web3::handle_web3_verify))
         // External Portal & Web3 Linking
         .route("/api/v1/auth/link/crazygames", post(routes::link::handle_link_crazygames))
         .route("/api/v1/auth/link/ethereum", post(routes::link::handle_link_ethereum))
