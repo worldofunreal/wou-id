@@ -123,6 +123,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Profile Management
         .route("/api/v1/user/profile/:id", get(routes::profile::handle_get_profile))
         .route("/api/v1/user/profile/:id/name", put(routes::profile::handle_update_display_name))
+        // Inventory — tradable collectibles (authoritative, Redb)
+        .route("/api/v1/inventory/:id", get(routes::inventory::handle_get_inventory))
+        .route("/api/v1/inventory/me", get(routes::inventory::handle_get_my_inventory))
+        .route("/api/v1/inventory/collect", post(routes::inventory::handle_collect))
+        .route("/api/v1/inventory/trade", post(routes::inventory::handle_trade_create))
+        .route("/api/v1/inventory/trade/:id", get(routes::inventory::handle_trade_get))
+        .route("/api/v1/inventory/trade/:id/accept", post(routes::inventory::handle_trade_accept))
+        .route("/api/v1/inventory/trade/:id/cancel", post(routes::inventory::handle_trade_cancel))
         // Newsletter Management
         .route("/api/v1/newsletter/subscribe", post(routes::newsletter::handle_newsletter_subscribe))
         .route("/api/v1/newsletter/unsubscribe", post(routes::newsletter::handle_newsletter_unsubscribe))

@@ -61,8 +61,9 @@ pub async fn handle_web3_verify(
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     let chain = payload.chain.to_lowercase();
     let provider = match chain.as_str() {
-        "solana" => AuthProvider::Solana,
-        "ethereum" | "evm" => AuthProvider::Ethereum,
+        "solana" | "sol" => AuthProvider::Solana,
+        "ethereum" | "evm" | "eth" => AuthProvider::Ethereum,
+        "icp" | "internet_identity" | "id_ai" => AuthProvider::InternetIdentity,
         _ => {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -75,6 +76,7 @@ pub async fn handle_web3_verify(
     let is_valid = match provider {
         AuthProvider::Solana => verify_solana_signature(&payload.public_address, &payload.message, &payload.signature),
         AuthProvider::Ethereum => verify_ethereum_signature(&payload.public_address, &payload.message, &payload.signature),
+        AuthProvider::InternetIdentity => wou_crypto::web3::validate_icp_principal(&payload.public_address),
         _ => Ok(false),
     };
 

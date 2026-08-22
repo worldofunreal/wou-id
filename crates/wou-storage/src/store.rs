@@ -7,6 +7,8 @@ use wou_core::{AuthProvider, PendingOtp, PlayerAccount, WouError};
 const PLAYERS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_players");
 const IDENTITY_INDEX_TABLE: TableDefinition<&str, &str> = TableDefinition::new("wou_identity_index");
 const NEWSLETTER_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_newsletter");
+const INVENTORY_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_inventory");
+const TRADES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_trades");
 
 #[derive(Clone)]
 pub struct WouStorage {
@@ -35,6 +37,8 @@ impl WouStorage {
             let _ = write_txn.open_table(PLAYERS_TABLE);
             let _ = write_txn.open_table(IDENTITY_INDEX_TABLE);
             let _ = write_txn.open_table(NEWSLETTER_TABLE);
+            let _ = write_txn.open_table(INVENTORY_TABLE);
+            let _ = write_txn.open_table(TRADES_TABLE);
         }
         write_txn
             .commit()
@@ -246,5 +250,145 @@ impl WouStorage {
 
     pub async fn find_account_by_email(&self, email: &str) -> Result<Option<PlayerAccount>, WouError> {
         self.find_account_by_identity(&AuthProvider::Email, email).await
+    }
+
+    // =========================================================================
+    // Inventory — tradable digital collectibles (Redb, authoritative)
+    // =========================================================================
+
+    pub async fn get_inventory(&self, account_id: &str) -> Result<Vec<String>, WouError> {
+        let read_txn = self
+            .redb
+            .begin_read()
+            .map_err(|e| WouError::DatabaseError(format!("Redb read txn failed: {e}")))?;
+        let table = read_txn
+            .open_table(INVENTORY_TABLE)
+            .map_err(|e| WouError::DatabaseError(format!("Open inventory table failed: {e}")))?;
+        match table.get(account_id) {
+            Ok(Some(v)) => {
+                let vec: Vec<String> = serde_json::from_slice(v.value())
+                    .map_err(|e| WouError::Internal(format!("Inventory parse failed: {e}")))?;
+                Ok(vec)
+            }
+            Ok(None) => Ok(vec![]),
+            Err(e) => Err(WouError::DatabaseError(format!("Redb inventory get failed: {e}"))),
+        }
+    }
+
+    pub async fn add_to_inventory(
+        &self,
+        account_id: &str,
+        card_ids: Vec<String>,
+    ) -> Result<Vec<String>, WouError> {
+        let mut current = self.get_inventory(account_id).await?;
+        let mut set: std::collections::HashSet<String> = current.drain(..).collect();
+        for id in card_ids {
+            let clean = id.trim().to_string();
+            if !clean.is_empty() {
+                set.insert(clean);
+            }
+        }
+        let mut merged: Vec<String> = set.into_iter().collect();
+        merged.sort();
+        let bytes = serde_json::to_vec(&merged)
+            .map_err(|e| WouError::Internal(format!("Inventory serialize failed: {e}")))?;
+        let write_txn = self
+            .redb
+            .begin_write()
+            .map_err(|e| WouError::DatabaseError(format!("Redb write txn failed: {e}")))?;
+        {
+            let mut t = write_txn
+                .open_table(INVENTORY_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open inventory table failed: {e}")))?;
+            t.insert(account_id, bytes.as_slice())
+                .map_err(|e| WouError::DatabaseError(format!("Insert inventory failed: {e}")))?;
+        }
+        write_txn
+            .commit()
+            .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
+        Ok(merged)
+    }
+
+    pub async fn remove_from_inventory(
+        &self,
+        account_id: &str,
+        card_ids: Vec<String>,
+    ) -> Result<Vec<String>, WouError> {
+        let mut current = self.get_inventory(account_id).await?;
+        let remove: std::collections::HashSet<String> = card_ids.into_iter().collect();
+        current.retain(|id| !remove.contains(id));
+        let bytes = serde_json::to_vec(&current)
+            .map_err(|e| WouError::Internal(format!("Inventory serialize failed: {e}")))?;
+        let write_txn = self
+            .redb
+            .begin_write()
+            .map_err(|e| WouError::DatabaseError(format!("Redb write txn failed: {e}")))?;
+        {
+            let mut t = write_txn
+                .open_table(INVENTORY_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open inventory table failed: {e}")))?;
+            t.insert(account_id, bytes.as_slice())
+                .map_err(|e| WouError::DatabaseError(format!("Insert inventory failed: {e}")))?;
+        }
+        write_txn
+            .commit()
+            .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
+        Ok(current)
+    }
+
+    // Trades — simple offer ledger (card-for-card, atomic swap on accept)
+    pub async fn save_trade(
+        &self,
+        trade_id: &str,
+        json_bytes: &[u8],
+    ) -> Result<(), WouError> {
+        let write_txn = self
+            .redb
+            .begin_write()
+            .map_err(|e| WouError::DatabaseError(format!("Redb write txn failed: {e}")))?;
+        {
+            let mut t = write_txn
+                .open_table(TRADES_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open trades table failed: {e}")))?;
+            t.insert(trade_id, json_bytes)
+                .map_err(|e| WouError::DatabaseError(format!("Insert trade failed: {e}")))?;
+        }
+        write_txn
+            .commit()
+            .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
+        Ok(())
+    }
+
+    pub async fn get_trade(&self, trade_id: &str) -> Result<Option<Vec<u8>>, WouError> {
+        let read_txn = self
+            .redb
+            .begin_read()
+            .map_err(|e| WouError::DatabaseError(format!("Redb read txn failed: {e}")))?;
+        let t = read_txn
+            .open_table(TRADES_TABLE)
+            .map_err(|e| WouError::DatabaseError(format!("Open trades table failed: {e}")))?;
+        match t.get(trade_id) {
+            Ok(Some(v)) => Ok(Some(v.value().to_vec())),
+            Ok(None) => Ok(None),
+            Err(e) => Err(WouError::DatabaseError(format!("Redb trade get failed: {e}"))),
+        }
+    }
+
+    pub async fn delete_trade(&self, trade_id: &str) -> Result<(), WouError> {
+        let write_txn = self
+            .redb
+            .begin_write()
+            .map_err(|e| WouError::DatabaseError(format!("Redb write txn failed: {e}")))?;
+        {
+            let mut t = write_txn
+                .open_table(TRADES_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open trades table failed: {e}")))?;
+            t.remove(trade_id)
+                .map_err(|e| WouError::DatabaseError(format!("Remove trade failed: {e}")))?;
+        }
+        write_txn
+            .commit()
+            .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
+        Ok(())
     }
 }

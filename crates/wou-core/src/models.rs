@@ -79,6 +79,8 @@ pub enum AuthProvider {
     Ethereum,
     /// Solana Wallet (SIWS)
     Solana,
+    /// Internet Identity / ICP Principal (id.ai)
+    InternetIdentity,
     /// Custom third-party affiliate portal
     Custom(String),
 }
@@ -96,6 +98,7 @@ impl AuthProvider {
             Self::Meta => "meta",
             Self::Ethereum => "ethereum",
             Self::Solana => "solana",
+            Self::InternetIdentity => "internet_identity",
             Self::Custom(s) => s.as_str(),
         }
     }
