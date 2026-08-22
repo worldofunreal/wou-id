@@ -41,3 +41,4 @@ bs58 = "0.5"
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 reqwest = { version = "0.12", features = ["json"] }
 urlencoding = "2.1"
+nanoid = "0.4"

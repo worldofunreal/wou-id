@@ -1,4 +1,4 @@
-use redb::{Database, TableDefinition};
+use redb::{Database, ReadableTable, TableDefinition};
 use redis::AsyncCommands;
 use std::sync::Arc;
 use tracing::info;
@@ -390,5 +390,29 @@ impl WouStorage {
             .commit()
             .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
         Ok(())
+    }
+
+    pub async fn list_open_trades(&self, limit: usize) -> Result<Vec<Vec<u8>>, WouError> {
+        let read_txn = self
+            .redb
+            .begin_read()
+            .map_err(|e| WouError::DatabaseError(format!("Redb read txn failed: {e}")))?;
+        let t = read_txn
+            .open_table(TRADES_TABLE)
+            .map_err(|e| WouError::DatabaseError(format!("Open trades table failed: {e}")))?;
+        let mut out = Vec::new();
+        for entry in t.iter().map_err(|e| WouError::DatabaseError(format!("Iter trades failed: {e}")))? {
+            let (_, v) = entry.map_err(|e| WouError::DatabaseError(format!("Iter entry failed: {e}")))?;
+            let bytes = v.value().to_vec();
+            if let Ok(trade) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if trade.get("status").and_then(|s| s.as_str()) == Some("open") {
+                    out.push(bytes);
+                    if out.len() >= limit {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 }

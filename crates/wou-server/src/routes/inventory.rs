@@ -224,3 +224,16 @@ pub async fn handle_trade_cancel(
     state.storage.save_trade(&trade.id, &bytes).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
     Ok(Json(serde_json::json!({"ok": true})))
 }
+
+pub async fn handle_trade_list(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<TradeOffer>>, (StatusCode, Json<serde_json::Value>)> {
+    let bytes_list = state.storage.list_open_trades(50).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+    let mut out = Vec::new();
+    for b in bytes_list {
+        if let Ok(t) = serde_json::from_slice::<TradeOffer>(&b) {
+            out.push(t);
+        }
+    }
+    Ok(Json(out))
+}
