@@ -284,7 +284,7 @@ pub fn generate_noble_animal_identity(account_id: &str, display_name: Option<Str
     // 3-digit suffix (100..=999)
     let num = 100 + ((hash_val / NOBLE_ANIMALS.len() as u64) % 900) as u32;
 
-    let username = format!("{animal_name}_{num}");
+    let username = format!("{animal_name}{num}");
     let final_display_name = display_name.unwrap_or_else(|| {
         let mut chars = animal_name.chars();
         let cap_animal = match chars.next() {
@@ -442,17 +442,16 @@ mod tests {
     #[test]
     fn test_noble_animal_identity_format() {
         let (username, _display_name, profile) = generate_noble_animal_identity("test_account_uuid_12345", None);
-        assert!(username.contains('_'), "Username should contain an underscore: {}", username);
-        
-        let parts: Vec<&str> = username.split('_').collect();
-        assert_eq!(parts.len(), 2);
-        
-        let animal = parts[0];
-        let num: u32 = parts[1].parse().expect("Suffix must be a valid 3-digit number");
-        assert!(num >= 100 && num <= 999, "Number must be 3 digits: {}", num);
+        assert!(!username.contains('_'), "Username should not contain an underscore: {}", username);
         
         let valid_animals: Vec<&str> = NOBLE_ANIMALS.iter().map(|(a, _, _)| *a).collect();
-        assert!(valid_animals.contains(&animal), "Animal {} must be in curated noble list", animal);
+        let matched = valid_animals.iter().any(|animal| username.starts_with(animal));
+        assert!(matched, "Username {} must start with a valid noble animal", username);
+        
+        let digits: String = username.chars().filter(|c| c.is_ascii_digit()).collect();
+        assert_eq!(digits.len(), 3, "Username must end with 3 digits: {}", username);
+        let num: u32 = digits.parse().expect("3 digits suffix must parse");
+        assert!(num >= 100 && num <= 999, "Number must be between 100 and 999: {}", num);
         
         assert!(profile.custom_attributes.contains_key("animal_emoji"));
         assert!(profile.custom_attributes.contains_key("animal_theme"));

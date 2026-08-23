@@ -254,4 +254,115 @@ impl WouClient {
 
         Ok(body.account)
     }
+
+    /// Step 5: Fetch player profile by account ID.
+    pub async fn get_profile(&self, account_id: &str) -> Result<PlayerAccount, WouError> {
+        let url = format!("{}/api/v1/user/profile/{}", self.base_url, account_id);
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| WouError::Internal(format!("HTTP request failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            let err = resp.text().await.unwrap_or_default();
+            return Err(WouError::AccountNotFound(format!("Profile not found: {err}")));
+        }
+
+        resp.json().await.map_err(|e| WouError::Internal(format!("JSON decode failed: {e}")))
+    }
+
+    /// Step 6: Fetch player profile by username.
+    pub async fn get_by_username(&self, username: &str) -> Result<PlayerAccount, WouError> {
+        let url = format!("{}/api/v1/user/by-username/{}", self.base_url, username);
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| WouError::Internal(format!("HTTP request failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            let err = resp.text().await.unwrap_or_default();
+            return Err(WouError::AccountNotFound(format!("User @{username} not found: {err}")));
+        }
+
+        resp.json().await.map_err(|e| WouError::Internal(format!("JSON decode failed: {e}")))
+    }
+
+    /// Step 7: Check username availability.
+    pub async fn check_username(&self, username: &str) -> Result<bool, WouError> {
+        let url = format!("{}/api/v1/user/check-username/{}", self.base_url, username);
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| WouError::Internal(format!("HTTP request failed: {e}")))?;
+
+        #[derive(Deserialize)]
+        struct AvailResp {
+            available: bool,
+        }
+
+        let body: AvailResp = resp.json().await.map_err(|e| WouError::Internal(format!("JSON decode failed: {e}")))?;
+        Ok(body.available)
+    }
+
+    /// Step 8: Follow a player.
+    pub async fn follow_user(&self, follower_id: &str, target_id: &str) -> Result<(), WouError> {
+        let url = format!("{}/api/v1/social/follow/{}", self.base_url, target_id);
+        let resp = self
+            .http
+            .post(&url)
+            .json(&serde_json::json!({ "follower_id": follower_id }))
+            .send()
+            .await
+            .map_err(|e| WouError::Internal(format!("HTTP request failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            let err = resp.text().await.unwrap_or_default();
+            return Err(WouError::Internal(format!("Follow failed: {err}")));
+        }
+
+        Ok(())
+    }
+
+    /// Step 9: Unfollow a player.
+    pub async fn unfollow_user(&self, follower_id: &str, target_id: &str) -> Result<(), WouError> {
+        let url = format!("{}/api/v1/social/unfollow/{}", self.base_url, target_id);
+        let resp = self
+            .http
+            .post(&url)
+            .json(&serde_json::json!({ "follower_id": follower_id }))
+            .send()
+            .await
+            .map_err(|e| WouError::Internal(format!("HTTP request failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            let err = resp.text().await.unwrap_or_default();
+            return Err(WouError::Internal(format!("Unfollow failed: {err}")));
+        }
+
+        Ok(())
+    }
+
+    /// Step 10: Fetch global activity feed.
+    pub async fn get_global_feed(&self) -> Result<Vec<wou_core::SocialActivity>, WouError> {
+        let url = format!("{}/api/v1/social/feed", self.base_url);
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| WouError::Internal(format!("HTTP request failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            let err = resp.text().await.unwrap_or_default();
+            return Err(WouError::Internal(format!("Feed fetch failed: {err}")));
+        }
+
+        resp.json().await.map_err(|e| WouError::Internal(format!("JSON decode failed: {e}")))
+    }
 }
