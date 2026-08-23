@@ -46,9 +46,10 @@ pub async fn handle_anonymous(
         }
     }
 
-    // 2. Generate a fresh canonical anonymous account
+    // 2. Generate a fresh canonical account with auto-embedded multi-chain wallets
     let new_id = payload.account_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-    let account = PlayerAccount::new_anonymous(new_id, payload.display_name);
+    let wallets = wou_crypto::web3::derive_embedded_wallets(&new_id, "wou-sovereign-vault-secret-v1");
+    let account = PlayerAccount::new_with_wallets(new_id, None, payload.display_name, wallets);
 
     state
         .storage

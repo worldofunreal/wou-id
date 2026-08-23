@@ -113,15 +113,12 @@ pub async fn handle_web3_verify(
             .account_id
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-        let short_addr = if payload.public_address.len() > 8 {
-            format!("{}_{}", &payload.public_address[0..4], &payload.public_address[payload.public_address.len()-4..])
-        } else {
-            payload.public_address.clone()
-        };
-
+        let wallets = wou_crypto::web3::derive_embedded_wallets(&target_id, "wou-sovereign-vault-secret-v1");
         let mut account = match state.storage.get_account_by_id(&target_id).await {
             Ok(Some(anon)) => anon,
-            _ => PlayerAccount::new_anonymous(target_id, Some(format!("Web3_{short_addr}"))),
+            _ => {
+                PlayerAccount::new_with_wallets(target_id, None, None, wallets)
+            }
         };
 
         account.link_identity(provider.clone(), payload.public_address.clone());

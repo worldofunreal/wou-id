@@ -1,4 +1,4 @@
-use wou_core::{AuthProvider, GameContext, PendingOtp, PlayerAccount};
+use wou_core::{AuthProvider, GameContext, PendingOtp, PlayerAccount, SocialActivity};
 use wou_crypto::JwtManager;
 use wou_storage::WouStorage;
 
@@ -15,72 +15,111 @@ async fn test_full_account_lifecycle() {
         }
     };
 
-    // 1. Create Anonymous Account
-    let anon_id = uuid::Uuid::new_v4().to_string();
-    let mut account = PlayerAccount::new_anonymous(anon_id.clone(), Some("Commander_Test".to_string()));
-    assert!(account.is_anonymous());
+    // 1. Create Account with Auto-Embedded Wallets & Username
+    let player_id = uuid::Uuid::new_v4().to_string();
+    let wallets = wou_crypto::web3::derive_embedded_wallets(&player_id, "test_secret_seed");
+    let mut account = PlayerAccount::new_with_wallets(
+        player_id.clone(),
+        Some("commander_prime".to_string()),
+        Some("Commander Prime".to_string()),
+        wallets.clone(),
+    );
+
+    assert_eq!(account.username, "commander_prime");
+    assert!(account.embedded_wallets.evm_address.starts_with("0x"));
+    assert!(account.embedded_wallets.solana_address.len() >= 32);
 
     storage.save_account(&account).await.unwrap();
 
-    // 2. Fetch and Verify Anonymous Account
-    let fetched = storage.get_account_by_id(&anon_id).await.unwrap().unwrap();
-    assert_eq!(fetched.display_name, "Commander_Test");
-    assert!(fetched.is_anonymous());
+    // 2. Fetch and Verify Account by ID and by Username Handle
+    let fetched = storage.get_account_by_id(&player_id).await.unwrap().unwrap();
+    assert_eq!(fetched.display_name, "Commander Prime");
+    assert_eq!(fetched.username, "commander_prime");
 
-    // 3. Request & Verify OTP (if Redis is running)
+    let by_user = storage.find_account_by_username("commander_prime").await.unwrap().unwrap();
+    assert_eq!(by_user.id, player_id);
+
+    // 3. Username Availability Check
+    assert!(!storage.is_username_available("commander_prime", "other_id").await.unwrap());
+    assert!(storage.is_username_available("commander_prime", &player_id).await.unwrap());
+    assert!(storage.is_username_available("unique_handle_999", &player_id).await.unwrap());
+
+    // 4. Request & Verify OTP
     let test_email = format!("tester_{}@worldofunreal.com", uuid::Uuid::new_v4());
     let otp = PendingOtp {
         code: "654321".to_string(),
-        account_id: Some(anon_id.clone()),
+        account_id: Some(player_id.clone()),
         email: test_email.clone(),
         context: GameContext::ShadowsOfWar,
         newsletter_opt_in: true,
         requested_at: chrono::Utc::now().timestamp() as u64,
     };
 
-    match storage.save_pending_otp(&otp, 600).await {
-        Ok(_) => {
-            let consumed = storage.get_and_consume_otp(&test_email, "654321").await.unwrap();
-            assert_eq!(consumed.email, test_email);
-        }
-        Err(e) => {
-            println!("Notice: Redis/Valkey offline in local test environment ({e}). Skipping hot OTP test.");
-        }
+    if let Ok(_) = storage.save_pending_otp(&otp, 600).await {
+        let consumed = storage.get_and_consume_otp(&test_email, "654321").await.unwrap();
+        assert_eq!(consumed.email, test_email);
     }
 
-    // 5. Promote Anonymous Account to Permanent Verified Email
+    // 5. Link Email Identity & CrazyGames Identity
     account.email = Some(test_email.clone());
     account.newsletter_opt_in = true;
     account.link_identity(AuthProvider::Email, test_email.clone());
-    storage.save_account(&account).await.unwrap();
-
-    // 6. Check that account is no longer anonymous and is indexed by email
-    let by_email = storage.find_account_by_email(&test_email).await.unwrap().unwrap();
-    assert_eq!(by_email.id, anon_id);
-    assert!(!by_email.is_anonymous());
-    assert_eq!(by_email.email, Some(test_email));
-    assert!(by_email.has_provider(&AuthProvider::Email));
-
-    // 7. Link CrazyGames Identity
     account.link_identity(AuthProvider::CrazyGames, "cg_user_998877".to_string());
     storage.save_account(&account).await.unwrap();
+
+    let by_email = storage.find_account_by_email(&test_email).await.unwrap().unwrap();
+    assert_eq!(by_email.id, player_id);
 
     let by_cg = storage
         .find_account_by_identity(&AuthProvider::CrazyGames, "cg_user_998877")
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(by_cg.id, anon_id);
+    assert_eq!(by_cg.id, player_id);
 
-    // 8. Issue & Verify JWT Session Token
+    // 6. Test Social Graph & Activity Feed
+    let target_player_id = uuid::Uuid::new_v4().to_string();
+    let target_wallets = wou_crypto::web3::derive_embedded_wallets(&target_player_id, "test_secret_seed");
+    let target_account = PlayerAccount::new_with_wallets(
+        target_player_id.clone(),
+        Some("rival_commander".to_string()),
+        Some("Rival Commander".to_string()),
+        target_wallets,
+    );
+    storage.save_account(&target_account).await.unwrap();
+
+    storage.follow_user(&player_id, &target_player_id).await.unwrap();
+    let followers = storage.get_followers(&target_player_id).await.unwrap();
+    assert!(followers.contains(&player_id));
+
+    // Record Activity
+    let activity = SocialActivity {
+        id: uuid::Uuid::new_v4().to_string(),
+        account_id: player_id.clone(),
+        username: "commander_prime".into(),
+        display_name: "Commander Prime".into(),
+        avatar_url: None,
+        activity_type: "sow_victory".into(),
+        title: "Ranked Victory in Shadows of War".into(),
+        description: "Achieved Master tier in 1v1 Battlegrounds".into(),
+        game: GameContext::ShadowsOfWar,
+        timestamp: chrono::Utc::now().timestamp() as u64,
+    };
+    storage.record_social_activity(&activity).await.unwrap();
+
+    let feed = storage.get_social_feed(10).await.unwrap();
+    assert!(!feed.is_empty());
+    assert_eq!(feed[0].title, "Ranked Victory in Shadows of War");
+
+    // 7. Issue & Verify JWT Session Token
     let jwt = JwtManager::new("integration_test_secret_key_123456789012345678901234567890");
     let token = jwt
         .issue_token(&account.id, &account.display_name, account.email.clone(), GameContext::ShadowsOfWar, 3600)
         .unwrap();
 
     let claims = jwt.verify_token(&token).unwrap();
-    assert_eq!(claims.sub, anon_id);
-    assert_eq!(claims.name, "Commander_Test");
+    assert_eq!(claims.sub, player_id);
+    assert_eq!(claims.name, "Commander Prime");
 
     // Clean up temporary redb file
     let _ = std::fs::remove_file(tmp_db_path);

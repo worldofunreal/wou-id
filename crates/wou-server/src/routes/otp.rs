@@ -140,9 +140,13 @@ pub async fn handle_verify_otp(
             .or(pending.account_id)
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
+        let wallets = wou_crypto::web3::derive_embedded_wallets(&target_id, "wou-sovereign-vault-secret-v1");
         let mut account = match state.storage.get_account_by_id(&target_id).await {
             Ok(Some(anon_acc)) => anon_acc,
-            _ => PlayerAccount::new_anonymous(target_id, None),
+            _ => {
+                let user_prefix = clean_email.split('@').next().unwrap_or("commander");
+                PlayerAccount::new_with_wallets(target_id, Some(user_prefix.to_string()), Some(user_prefix.to_string()), wallets)
+            }
         };
 
         // Link verified email identity

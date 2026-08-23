@@ -120,9 +120,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/auth/link/crazygames", post(routes::link::handle_link_crazygames))
         .route("/api/v1/auth/link/ethereum", post(routes::link::handle_link_ethereum))
         .route("/api/v1/auth/link/solana", post(routes::link::handle_link_solana))
-        // Profile Management
-        .route("/api/v1/user/profile/:id", get(routes::profile::handle_get_profile))
-        .route("/api/v1/user/profile/:id/name", put(routes::profile::handle_update_display_name))
+        // Profile & Username Handle Management
+        .route("/api/v1/user/profile/:id", get(routes::profile::handle_get_profile).put(routes::profile::handle_update_profile))
+        .route("/api/v1/user/by-username/:username", get(routes::profile::handle_get_by_username))
+        .route("/api/v1/user/check-username/:username", get(routes::profile::handle_check_username))
+        .route("/api/v1/user/upload-media", post(routes::upload::handle_upload_media))
+        // Social Graph & Battle.net Cross-Activity Stream
+        .route("/api/v1/social/follow/:target_id", post(routes::social::handle_follow_user))
+        .route("/api/v1/social/unfollow/:target_id", post(routes::social::handle_unfollow_user))
+        .route("/api/v1/social/graph/:account_id", get(routes::social::handle_get_social_graph))
+        .route("/api/v1/social/feed", get(routes::social::handle_get_global_feed))
+        .route("/api/v1/social/activity", post(routes::social::handle_record_activity))
         // Inventory — tradable collectibles (authoritative, Redb)
         .route("/api/v1/inventory/me", get(routes::inventory::handle_get_my_inventory))
         .route("/api/v1/inventory/collect", post(routes::inventory::handle_collect))

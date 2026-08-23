@@ -12,7 +12,8 @@ use crate::state::AppState;
 
 #[derive(Deserialize)]
 pub struct OAuthLoginQuery {
-    pub redirect_uri: String,
+    pub redirect_uri: Option<String>,
+    pub redirect_url: Option<String>,
     #[serde(default)]
     pub state: Option<String>,
 }
@@ -26,7 +27,7 @@ pub async fn handle_oauth_login(
     Path(provider_str): Path<String>,
     Query(query): Query<OAuthLoginQuery>,
     State(state): State<AppState>,
-) -> Result<Json<OAuthLoginResponse>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     let provider = match provider_str.to_lowercase().as_str() {
         "discord" => AuthProvider::Discord,
         "google" => AuthProvider::Google,
@@ -42,22 +43,25 @@ pub async fn handle_oauth_login(
 
     let client_id_env = format!("WOU_{}_CLIENT_ID", provider.as_str().to_uppercase());
     let client_id = std::env::var(&client_id_env).unwrap_or_else(|_| "mock_client_id".into());
+    let redirect_uri = query
+        .redirect_uri
+        .or(query.redirect_url)
+        .unwrap_or_else(|| "https://worldofunreal.com/auth/callback".into());
     let state_str = query.state.unwrap_or_else(|| "default_state".into());
 
     let auth_url = state
         .oauth
-        .build_authorization_url(&provider, &client_id, &query.redirect_uri, &state_str)
+        .build_authorization_url(&provider, &client_id, &redirect_uri, &state_str)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
 
-    Ok(Json(OAuthLoginResponse {
-        authorization_url: auth_url,
-    }))
+    Ok(axum::response::Redirect::temporary(&auth_url))
 }
 
 #[derive(Deserialize)]
 pub struct OAuthCallbackPayload {
     pub code: String,
-    pub redirect_uri: String,
+    pub redirect_uri: Option<String>,
+    pub redirect_url: Option<String>,
     #[serde(default)]
     pub account_id: Option<String>,
     #[serde(default)]
@@ -95,6 +99,11 @@ pub async fn handle_oauth_callback(
     let client_id = std::env::var(&client_id_env).unwrap_or_else(|_| "mock_client_id".into());
     let client_secret = std::env::var(&client_secret_env).unwrap_or_else(|_| "mock_client_secret".into());
 
+    let redirect_uri = payload
+        .redirect_uri
+        .or(payload.redirect_url)
+        .unwrap_or_else(|| "https://worldofunreal.com/auth/callback".into());
+
     // Exchange authorization code for verified user profile info
     let user_info = state
         .oauth
@@ -103,7 +112,7 @@ pub async fn handle_oauth_callback(
             &payload.code,
             &client_id,
             &client_secret,
-            &payload.redirect_uri,
+            &redirect_uri,
         )
         .await
         .map_err(|e| (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": e.to_string()}))))?;
@@ -128,9 +137,12 @@ pub async fn handle_oauth_callback(
             .account_id
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
+        let wallets = wou_crypto::web3::derive_embedded_wallets(&target_id, "wou-sovereign-vault-secret-v1");
         let mut account = match state.storage.get_account_by_id(&target_id).await {
             Ok(Some(anon)) => anon,
-            _ => PlayerAccount::new_anonymous(target_id, user_info.display_name.clone()),
+            _ => {
+                PlayerAccount::new_with_wallets(target_id, None, user_info.display_name.clone(), wallets)
+            }
         };
 
         if let Some(ref email) = user_info.email {

@@ -25,8 +25,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.8", features = ["v4", "serde"] }
 thiserror = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
-axum = { version = "0.7", features = ["ws"] }
-tower-http = { version = "0.5", features = ["cors", "trace"] }
+axum = { version = "0.7", features = ["ws", "multipart"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "fs"] }
 lettre = { version = "0.11", features = ["tokio1-native-tls", "builder", "smtp-transport"] }
 redis = { version = "0.25", features = ["tokio-comp", "aio"] }
 redb = "2.1"
