@@ -71,10 +71,18 @@ pub async fn handle_check_username(
 }
 
 pub async fn handle_update_profile(
+    auth: crate::AuthSession,
     Path(account_id): Path<String>,
     State(state): State<AppState>,
     Json(payload): Json<UpdateProfilePayload>,
 ) -> Result<Json<PlayerAccount>, (StatusCode, Json<serde_json::Value>)> {
+    if auth.account_id != account_id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Forbidden: You cannot modify another player's profile"})),
+        ));
+    }
+
     let mut account = state
         .storage
         .get_account_by_id(&account_id)

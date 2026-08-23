@@ -18,11 +18,6 @@ pub struct OAuthLoginQuery {
     pub state: Option<String>,
 }
 
-#[derive(Serialize)]
-pub struct OAuthLoginResponse {
-    pub authorization_url: String,
-}
-
 pub async fn handle_oauth_login(
     Path(provider_str): Path<String>,
     Query(query): Query<OAuthLoginQuery>,

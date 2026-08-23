@@ -20,7 +20,9 @@ fn default_limit() -> usize {
 
 #[derive(Deserialize)]
 pub struct RecordActivityPayload {
-    pub account_id: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub account_id: Option<String>,
     pub activity_type: String,
     pub title: String,
     pub description: String,
@@ -43,47 +45,44 @@ pub struct SocialCountsResponse {
 }
 
 pub async fn handle_follow_user(
+    auth: crate::AuthSession,
     Path(target_id): Path<String>,
     State(state): State<AppState>,
-    Json(payload): Json<serde_json::Value>,
 ) -> Result<Json<FollowResponse>, (StatusCode, Json<serde_json::Value>)> {
-    let follower_id = payload
-        .get("follower_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Missing follower_id"}))))?;
+    if auth.account_id == target_id {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Cannot follow yourself"})),
+        ));
+    }
 
     state
         .storage
-        .follow_user(follower_id, &target_id)
+        .follow_user(&auth.account_id, &target_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
 
     Ok(Json(FollowResponse {
         status: "following",
-        follower_id: follower_id.to_string(),
+        follower_id: auth.account_id,
         target_id,
     }))
 }
 
 pub async fn handle_unfollow_user(
+    auth: crate::AuthSession,
     Path(target_id): Path<String>,
     State(state): State<AppState>,
-    Json(payload): Json<serde_json::Value>,
 ) -> Result<Json<FollowResponse>, (StatusCode, Json<serde_json::Value>)> {
-    let follower_id = payload
-        .get("follower_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Missing follower_id"}))))?;
-
     state
         .storage
-        .unfollow_user(follower_id, &target_id)
+        .unfollow_user(&auth.account_id, &target_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
 
     Ok(Json(FollowResponse {
         status: "unfollowed",
-        follower_id: follower_id.to_string(),
+        follower_id: auth.account_id,
         target_id,
     }))
 }
@@ -116,12 +115,13 @@ pub async fn handle_get_global_feed(
 }
 
 pub async fn handle_record_activity(
+    auth: crate::AuthSession,
     State(state): State<AppState>,
     Json(payload): Json<RecordActivityPayload>,
 ) -> Result<Json<SocialActivity>, (StatusCode, Json<serde_json::Value>)> {
     let account = state
         .storage
-        .get_account_by_id(&payload.account_id)
+        .get_account_by_id(&auth.account_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Account not found"}))))?;
