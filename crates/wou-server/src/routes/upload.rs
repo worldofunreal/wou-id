@@ -1,6 +1,6 @@
 use axum::{
     extract::{Multipart, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::IntoResponse,
     Json,
 };
@@ -19,32 +19,11 @@ pub struct UploadResponse {
 }
 
 pub async fn handle_upload_media(
+    auth: crate::AuthSession,
     State(state): State<AppState>,
-    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    // 1. Authenticate via Bearer token
-    let auth_header = headers
-        .get("authorization")
-        .and_then(|h| h.to_str().ok())
-        .ok_or_else(|| {
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "Missing Authorization header"})),
-            )
-        })?;
-
-    let token = auth_header
-        .strip_prefix("Bearer ")
-        .or_else(|| auth_header.strip_prefix("bearer "))
-        .unwrap_or(auth_header);
-
-    let claims = state
-        .jwt
-        .verify_token(token)
-        .map_err(|e| (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": e.to_string()}))))?;
-
-    let account_id = claims.sub;
+    let account_id = auth.account_id;
 
     let mut media_type = "avatar".to_string();
     let mut file_bytes: Option<Vec<u8>> = None;

@@ -1,8 +1,11 @@
+mod auth;
 mod routes;
 mod state;
 
+pub use auth::AuthSession;
+
 use axum::{
-    routing::{get, post, put},
+    routing::{get, post},
     Router,
 };
 use std::net::SocketAddr;

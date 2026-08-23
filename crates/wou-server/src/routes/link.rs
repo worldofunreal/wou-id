@@ -8,7 +8,9 @@ use crate::state::AppState;
 
 #[derive(Deserialize)]
 pub struct LinkCrazyGamesPayload {
-    pub account_id: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub account_id: Option<String>,
     pub token: String,
     #[serde(default)]
     #[allow(dead_code)]
@@ -17,7 +19,9 @@ pub struct LinkCrazyGamesPayload {
 
 #[derive(Deserialize)]
 pub struct LinkWeb3Payload {
-    pub account_id: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub account_id: Option<String>,
     pub address_or_pubkey: String,
     pub message: String,
     pub signature: String,
@@ -33,6 +37,7 @@ pub struct LinkResponse {
 }
 
 pub async fn handle_link_crazygames(
+    auth: crate::AuthSession,
     State(state): State<AppState>,
     Json(payload): Json<LinkCrazyGamesPayload>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
@@ -42,7 +47,7 @@ pub async fn handle_link_crazygames(
 
     let mut account = state
         .storage
-        .get_account_by_id(&payload.account_id)
+        .get_account_by_id(&auth.account_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Account not found"}))))?;
@@ -61,6 +66,7 @@ pub async fn handle_link_crazygames(
 }
 
 pub async fn handle_link_ethereum(
+    auth: crate::AuthSession,
     State(state): State<AppState>,
     Json(payload): Json<LinkWeb3Payload>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
@@ -76,7 +82,7 @@ pub async fn handle_link_ethereum(
 
     let mut account = state
         .storage
-        .get_account_by_id(&payload.account_id)
+        .get_account_by_id(&auth.account_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Account not found"}))))?;
@@ -95,6 +101,7 @@ pub async fn handle_link_ethereum(
 }
 
 pub async fn handle_link_solana(
+    auth: crate::AuthSession,
     State(state): State<AppState>,
     Json(payload): Json<LinkWeb3Payload>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
@@ -110,7 +117,7 @@ pub async fn handle_link_solana(
 
     let mut account = state
         .storage
-        .get_account_by_id(&payload.account_id)
+        .get_account_by_id(&auth.account_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Account not found"}))))?;

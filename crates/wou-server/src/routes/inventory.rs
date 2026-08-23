@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -18,21 +18,11 @@ pub struct InventoryResponse {
     pub card_ids: Vec<String>,
 }
 
-fn extract_bearer(headers: &HeaderMap) -> Option<String> {
-    let v = headers.get("authorization")?.to_str().ok()?;
-    if v.to_lowercase().starts_with("bearer ") {
-        Some(v[7..].trim().to_string())
-    } else {
-        None
-    }
-}
-
 // Public: anyone can view an account's showcase inventory
 pub async fn handle_get_inventory(
     Path(account_id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<Json<InventoryResponse>, (StatusCode, Json<serde_json::Value>)> {
-    // Verify account exists (404 if not)
     let exists = state
         .storage
         .get_account_by_id(&account_id)
@@ -49,19 +39,13 @@ pub async fn handle_get_inventory(
     Ok(Json(InventoryResponse { account_id, card_ids: ids }))
 }
 
-// Authenticated: caller must present Bearer token whose sub == account in token
+// Authenticated: caller must present valid AuthSession
 pub async fn handle_collect(
+    auth: crate::AuthSession,
     State(state): State<AppState>,
-    headers: HeaderMap,
     Json(payload): Json<CollectPayload>,
 ) -> Result<Json<InventoryResponse>, (StatusCode, Json<serde_json::Value>)> {
-    let token = extract_bearer(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Missing Bearer token"}))))?;
-    let claims = state
-        .jwt
-        .verify_token(&token)
-        .map_err(|e| (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": e.to_string()}))))?;
-    let account_id = claims.sub;
+    let account_id = auth.account_id;
     if payload.card_ids.is_empty() || payload.card_ids.len() > 50 {
         return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "card_ids must be 1..50"}))));
     }
@@ -74,16 +58,10 @@ pub async fn handle_collect(
 }
 
 pub async fn handle_get_my_inventory(
+    auth: crate::AuthSession,
     State(state): State<AppState>,
-    headers: HeaderMap,
 ) -> Result<Json<InventoryResponse>, (StatusCode, Json<serde_json::Value>)> {
-    let token = extract_bearer(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Missing Bearer token"}))))?;
-    let claims = state
-        .jwt
-        .verify_token(&token)
-        .map_err(|e| (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": e.to_string()}))))?;
-    let account_id = claims.sub;
+    let account_id = auth.account_id;
     let ids = state
         .storage
         .get_inventory(&account_id)
@@ -112,14 +90,11 @@ pub struct TradeOffer {
 }
 
 pub async fn handle_trade_create(
+    auth: crate::AuthSession,
     State(state): State<AppState>,
-    headers: HeaderMap,
     Json(payload): Json<TradeCreatePayload>,
 ) -> Result<Json<TradeOffer>, (StatusCode, Json<serde_json::Value>)> {
-    let token = extract_bearer(&headers)
-        .ok_or((StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Missing Bearer token"}))))?;
-    let claims = state.jwt.verify_token(&token).map_err(|e| (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": e.to_string()}))))?;
-    let from = claims.sub;
+    let from = auth.account_id;
 
     if payload.offered.is_empty() || payload.requested.is_empty() {
         return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "offered and requested must be non-empty"}))));
@@ -157,13 +132,11 @@ pub async fn handle_trade_get(
 }
 
 pub async fn handle_trade_accept(
+    auth: crate::AuthSession,
     Path(trade_id): Path<String>,
     State(state): State<AppState>,
-    headers: HeaderMap,
 ) -> Result<Json<TradeOffer>, (StatusCode, Json<serde_json::Value>)> {
-    let token = extract_bearer(&headers).ok_or((StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Missing Bearer token"}))))?;
-    let claims = state.jwt.verify_token(&token).map_err(|e| (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": e.to_string()}))))?;
-    let acceptor = claims.sub;
+    let acceptor = auth.account_id;
 
     let bytes = state.storage.get_trade(&trade_id).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
     let Some(b) = bytes else { return Err((StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Trade not found"})))) };
@@ -193,7 +166,7 @@ pub async fn handle_trade_accept(
             return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("Offerer no longer owns {}", c)}))));
         }
     }
-    // Atomic swap (two removes + two adds — Redb txns are per-account, so 4 writes; acceptable for MVP)
+    // Atomic swap
     state.storage.remove_from_inventory(&trade.from_account, trade.offered.clone()).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
     state.storage.add_to_inventory(&acceptor, trade.offered.clone()).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
     state.storage.remove_from_inventory(&acceptor, trade.requested.clone()).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
@@ -206,13 +179,11 @@ pub async fn handle_trade_accept(
 }
 
 pub async fn handle_trade_cancel(
+    auth: crate::AuthSession,
     Path(trade_id): Path<String>,
     State(state): State<AppState>,
-    headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let token = extract_bearer(&headers).ok_or((StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Missing Bearer token"}))))?;
-    let claims = state.jwt.verify_token(&token).map_err(|e| (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": e.to_string()}))))?;
-    let caller = claims.sub;
+    let caller = auth.account_id;
     let bytes = state.storage.get_trade(&trade_id).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
     let Some(b) = bytes else { return Err((StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Trade not found"})))) };
     let mut trade: TradeOffer = serde_json::from_slice(&b).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
