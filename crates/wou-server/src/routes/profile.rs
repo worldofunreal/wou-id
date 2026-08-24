@@ -148,3 +148,29 @@ pub async fn handle_update_profile(
 
     Ok(Json(account))
 }
+
+#[derive(Deserialize)]
+pub struct SearchPlayersQuery {
+    #[serde(default)]
+    pub q: String,
+    #[serde(default = "default_search_limit")]
+    pub limit: usize,
+}
+
+fn default_search_limit() -> usize {
+    10
+}
+
+pub async fn handle_search_players(
+    Query(query): Query<SearchPlayersQuery>,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<wou_core::PlayerSearchResult>>, (StatusCode, Json<serde_json::Value>)> {
+    let results = state
+        .storage
+        .search_players(&query.q, query.limit.min(50))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+
+    Ok(Json(results))
+}
+

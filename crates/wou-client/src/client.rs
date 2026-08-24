@@ -365,4 +365,104 @@ impl WouClient {
 
         resp.json().await.map_err(|e| WouError::Internal(format!("JSON decode failed: {e}")))
     }
+
+    /// Step 11: Search players by handle or display name.
+    pub async fn search_players(&self, query: &str, limit: usize) -> Result<Vec<wou_core::PlayerSearchResult>, WouError> {
+        let url = format!("{}/api/v1/user/search", self.base_url);
+        let resp = self
+            .http
+            .get(&url)
+            .query(&[("q", query), ("limit", &limit.to_string())])
+            .send()
+            .await
+            .map_err(|e| WouError::Internal(format!("HTTP request failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            let err = resp.text().await.unwrap_or_default();
+            return Err(WouError::Internal(format!("Search failed: {err}")));
+        }
+
+        resp.json().await.map_err(|e| WouError::Internal(format!("JSON decode failed: {e}")))
+    }
+
+    /// Step 12: Create a Clan.
+    pub async fn create_clan(&self, token: &str, tag: &str, name: &str, description: Option<&str>) -> Result<wou_core::Clan, WouError> {
+        let url = format!("{}/api/v1/clans/create", self.base_url);
+        let resp = self
+            .http
+            .post(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .json(&serde_json::json!({
+                "tag": tag,
+                "name": name,
+                "description": description
+            }))
+            .send()
+            .await
+            .map_err(|e| WouError::Internal(format!("HTTP request failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            let err = resp.text().await.unwrap_or_default();
+            return Err(WouError::Internal(format!("Create clan failed: {err}")));
+        }
+
+        resp.json().await.map_err(|e| WouError::Internal(format!("JSON decode failed: {e}")))
+    }
+
+    /// Step 13: List active clans.
+    pub async fn list_clans(&self, limit: usize) -> Result<Vec<wou_core::Clan>, WouError> {
+        let url = format!("{}/api/v1/clans/list?limit={}", self.base_url, limit);
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| WouError::Internal(format!("HTTP request failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            let err = resp.text().await.unwrap_or_default();
+            return Err(WouError::Internal(format!("List clans failed: {err}")));
+        }
+
+        resp.json().await.map_err(|e| WouError::Internal(format!("JSON decode failed: {e}")))
+    }
+
+    /// Step 14: Join a clan.
+    pub async fn join_clan(&self, token: &str, tag: &str) -> Result<(), WouError> {
+        let url = format!("{}/api/v1/clans/{}/join", self.base_url, tag);
+        let resp = self
+            .http
+            .post(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .map_err(|e| WouError::Internal(format!("HTTP request failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            let err = resp.text().await.unwrap_or_default();
+            return Err(WouError::Internal(format!("Join clan failed: {err}")));
+        }
+
+        Ok(())
+    }
+
+    /// Step 15: Leave a clan.
+    pub async fn leave_clan(&self, token: &str, tag: &str) -> Result<(), WouError> {
+        let url = format!("{}/api/v1/clans/{}/leave", self.base_url, tag);
+        let resp = self
+            .http
+            .post(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .map_err(|e| WouError::Internal(format!("HTTP request failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            let err = resp.text().await.unwrap_or_default();
+            return Err(WouError::Internal(format!("Leave clan failed: {err}")));
+        }
+
+        Ok(())
+    }
 }
+
