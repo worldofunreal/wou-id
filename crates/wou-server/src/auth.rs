@@ -9,8 +9,8 @@ use wou_core::SessionClaims;
 
 use crate::state::AppState;
 
-/// Sovereign type-level authentication guard.
-/// Ensures zero-overhead verification in CPU L1 cache, zero DB roundtrips.
+/// Type-safe authentication session extractor for Axum.
+/// Fast in-memory token verification without database roundtrips.
 #[derive(Debug, Clone)]
 pub struct AuthSession {
     pub account_id: String,

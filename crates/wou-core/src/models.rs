@@ -302,7 +302,7 @@ pub fn generate_noble_animal_identity(account_id: &str, display_name: Option<Str
         avatar_url: None,
         banner_url: None,
         country: None,
-        bio: Some(format!("Sovereign Player · {}", emoji)),
+        bio: Some(format!("Player · {}", emoji)),
         is_verified: false,
         custom_attributes: custom,
     };
