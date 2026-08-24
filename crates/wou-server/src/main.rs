@@ -127,7 +127,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/user/profile/:id", get(routes::profile::handle_get_profile).put(routes::profile::handle_update_profile))
         .route("/api/v1/user/by-username/:username", get(routes::profile::handle_get_by_username))
         .route("/api/v1/user/check-username/:username", get(routes::profile::handle_check_username))
+        .route("/api/v1/user/search", get(routes::profile::handle_search_players))
         .route("/api/v1/user/upload-media", post(routes::upload::handle_upload_media))
+        // Clans & Guilds
+        .route("/api/v1/clans/create", post(routes::clan::handle_create_clan))
+        .route("/api/v1/clans/list", get(routes::clan::handle_list_clans))
+        .route("/api/v1/clans/:tag", get(routes::clan::handle_get_clan))
+        .route("/api/v1/clans/:tag/join", post(routes::clan::handle_join_clan))
+        .route("/api/v1/clans/:tag/leave", post(routes::clan::handle_leave_clan))
         // Social Graph & Battle.net Cross-Activity Stream
         .route("/api/v1/social/follow/:target_id", post(routes::social::handle_follow_user))
         .route("/api/v1/social/unfollow/:target_id", post(routes::social::handle_unfollow_user))

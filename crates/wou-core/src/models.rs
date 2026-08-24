@@ -399,6 +399,61 @@ pub struct PendingOtp {
     pub requested_at: u64,
 }
 
+/// Authoritative Clan entity.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Clan {
+    /// 2-5 uppercase characters identifier (e.g. "SOW", "VOID", "UNREAL")
+    pub tag: String,
+    /// Human-readable clan name (3-32 characters)
+    pub name: String,
+    /// Public description / motto
+    pub description: String,
+    /// Creator and leader account ID
+    pub leader_id: String,
+    /// Creator and leader username handle
+    pub leader_username: String,
+    /// Optional clan avatar / emblem URL
+    pub avatar_url: Option<String>,
+    /// Optional clan banner URL
+    pub banner_url: Option<String>,
+    /// Total member count
+    pub member_count: u32,
+    /// Clan creation timestamp
+    pub created_at: u64,
+}
+
+/// Role of a player within a Clan.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClanRole {
+    Leader,
+    Officer,
+    Member,
+}
+
+/// Member record in a Clan roster.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ClanMember {
+    pub account_id: String,
+    pub username: String,
+    pub display_name: String,
+    pub avatar_url: Option<String>,
+    pub animal_emoji: Option<String>,
+    pub role: ClanRole,
+    pub joined_at: u64,
+}
+
+/// Fast search result for player discovery.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PlayerSearchResult {
+    pub id: String,
+    pub username: String,
+    pub display_name: String,
+    pub avatar_url: Option<String>,
+    pub animal_emoji: Option<String>,
+    pub clan_tag: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

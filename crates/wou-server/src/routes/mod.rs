@@ -1,4 +1,5 @@
 pub mod anonymous;
+pub mod clan;
 pub mod inventory;
 pub mod link;
 pub mod newsletter;

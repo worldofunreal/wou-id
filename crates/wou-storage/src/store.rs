@@ -2,7 +2,7 @@ use redb::{Database, ReadableTable, TableDefinition};
 use redis::AsyncCommands;
 use std::sync::Arc;
 use tracing::info;
-use wou_core::{AuthProvider, PendingOtp, PlayerAccount, WouError};
+use wou_core::{AuthProvider, Clan, ClanMember, PendingOtp, PlayerAccount, PlayerSearchResult, WouError};
 
 const PLAYERS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_players");
 const IDENTITY_INDEX_TABLE: TableDefinition<&str, &str> = TableDefinition::new("wou_identity_index");
@@ -12,6 +12,8 @@ const INVENTORY_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_
 const TRADES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_trades");
 const FOLLOWERS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_social_followers");
 const ACTIVITY_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_social_activity");
+const CLANS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_clans");
+const CLAN_MEMBERS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_clan_members");
 
 #[derive(Clone)]
 pub struct WouStorage {
@@ -45,6 +47,8 @@ impl WouStorage {
             let _ = write_txn.open_table(TRADES_TABLE);
             let _ = write_txn.open_table(FOLLOWERS_TABLE);
             let _ = write_txn.open_table(ACTIVITY_TABLE);
+            let _ = write_txn.open_table(CLANS_TABLE);
+            let _ = write_txn.open_table(CLAN_MEMBERS_TABLE);
         }
         write_txn
             .commit()
@@ -716,5 +720,293 @@ impl WouStorage {
             }
         }
         Ok(out)
+    }
+
+    // ==========================================
+    // CLANS & GUILDS
+    // ==========================================
+
+    pub async fn create_clan(&self, clan: &Clan, leader_member: &ClanMember) -> Result<(), WouError> {
+        let tag = clan.tag.to_uppercase();
+        let bytes = serde_json::to_vec(clan)
+            .map_err(|e| WouError::Internal(format!("Failed to serialize clan: {e}")))?;
+        let member_bytes = serde_json::to_vec(leader_member)
+            .map_err(|e| WouError::Internal(format!("Failed to serialize clan member: {e}")))?;
+
+        let write_txn = self
+            .redb
+            .begin_write()
+            .map_err(|e| WouError::DatabaseError(format!("Redb write txn failed: {e}")))?;
+        {
+            let mut clans = write_txn
+                .open_table(CLANS_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open clans table failed: {e}")))?;
+
+            if clans.get(tag.as_str()).map_err(|e| WouError::DatabaseError(e.to_string()))?.is_some() {
+                return Err(WouError::Internal(format!("Clan tag [{tag}] is already taken")));
+            }
+
+            clans
+                .insert(tag.as_str(), bytes.as_slice())
+                .map_err(|e| WouError::DatabaseError(format!("Insert clan failed: {e}")))?;
+
+            let mut members = write_txn
+                .open_table(CLAN_MEMBERS_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open clan members table failed: {e}")))?;
+
+            let member_key = format!("{tag}:{}", leader_member.account_id);
+            members
+                .insert(member_key.as_str(), member_bytes.as_slice())
+                .map_err(|e| WouError::DatabaseError(format!("Insert clan member failed: {e}")))?;
+        }
+        write_txn
+            .commit()
+            .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
+
+        // Cache in Valkey
+        if let Ok(mut conn) = self.get_redis().await {
+            let _: Result<(), _> = conn.set_ex(format!("wou_clan:{tag}"), serde_json::to_string(clan).unwrap_or_default(), 86400).await;
+        }
+
+        Ok(())
+    }
+
+    pub async fn get_clan(&self, tag: &str) -> Result<Option<Clan>, WouError> {
+        let clean_tag = tag.trim().to_uppercase();
+
+        // 1. Try Valkey cache
+        if let Ok(mut conn) = self.get_redis().await {
+            if let Ok(Some(cached)) = conn.get::<_, Option<String>>(format!("wou_clan:{clean_tag}")).await {
+                if let Ok(clan) = serde_json::from_str::<Clan>(&cached) {
+                    return Ok(Some(clan));
+                }
+            }
+        }
+
+        // 2. Fallback to Redb
+        let read_txn = self
+            .redb
+            .begin_read()
+            .map_err(|e| WouError::DatabaseError(format!("Redb read txn failed: {e}")))?;
+        let table = read_txn
+            .open_table(CLANS_TABLE)
+            .map_err(|e| WouError::DatabaseError(format!("Open clans table failed: {e}")))?;
+
+        match table.get(clean_tag.as_str()) {
+            Ok(Some(val)) => {
+                let clan: Clan = serde_json::from_slice(val.value())
+                    .map_err(|e| WouError::Internal(format!("Clan deserialization failed: {e}")))?;
+                Ok(Some(clan))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(WouError::DatabaseError(format!("Redb clan get failed: {e}"))),
+        }
+    }
+
+    pub async fn get_clan_members(&self, tag: &str) -> Result<Vec<ClanMember>, WouError> {
+        let clean_tag = tag.trim().to_uppercase();
+        let prefix = format!("{clean_tag}:");
+
+        let read_txn = self
+            .redb
+            .begin_read()
+            .map_err(|e| WouError::DatabaseError(format!("Redb read txn failed: {e}")))?;
+        let table = read_txn
+            .open_table(CLAN_MEMBERS_TABLE)
+            .map_err(|e| WouError::DatabaseError(format!("Open clan members table failed: {e}")))?;
+
+        let mut members = Vec::new();
+        for item in table.range(prefix.as_str()..).map_err(|e| WouError::DatabaseError(format!("Range failed: {e}")))? {
+            let (k, v) = item.map_err(|e| WouError::DatabaseError(format!("Entry failed: {e}")))?;
+            let key = k.value();
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            if let Ok(member) = serde_json::from_slice::<ClanMember>(v.value()) {
+                members.push(member);
+            }
+        }
+
+        Ok(members)
+    }
+
+    pub async fn join_clan(&self, tag: &str, member: &ClanMember) -> Result<(), WouError> {
+        let clean_tag = tag.trim().to_uppercase();
+        let member_bytes = serde_json::to_vec(member)
+            .map_err(|e| WouError::Internal(format!("Failed to serialize member: {e}")))?;
+
+        let write_txn = self
+            .redb
+            .begin_write()
+            .map_err(|e| WouError::DatabaseError(format!("Redb write txn failed: {e}")))?;
+        {
+            let mut clans = write_txn
+                .open_table(CLANS_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open clans table failed: {e}")))?;
+
+            let existing_bytes = {
+                let clan_entry = clans.get(clean_tag.as_str()).map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                let Some(entry) = clan_entry else {
+                    return Err(WouError::Internal(format!("Clan [{clean_tag}] not found")));
+                };
+                entry.value().to_vec()
+            };
+
+            let mut clan: Clan = serde_json::from_slice(&existing_bytes)
+                .map_err(|e| WouError::Internal(format!("Clan parse failed: {e}")))?;
+
+            clan.member_count += 1;
+            let updated_bytes = serde_json::to_vec(&clan)
+                .map_err(|e| WouError::Internal(format!("Serialize failed: {e}")))?;
+
+            clans
+                .insert(clean_tag.as_str(), updated_bytes.as_slice())
+                .map_err(|e| WouError::DatabaseError(format!("Update clan failed: {e}")))?;
+
+            let mut members = write_txn
+                .open_table(CLAN_MEMBERS_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open clan members table failed: {e}")))?;
+
+            let member_key = format!("{clean_tag}:{}", member.account_id);
+            members
+                .insert(member_key.as_str(), member_bytes.as_slice())
+                .map_err(|e| WouError::DatabaseError(format!("Insert clan member failed: {e}")))?;
+        }
+        write_txn
+            .commit()
+            .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
+
+        // Invalidate Valkey cache
+        if let Ok(mut conn) = self.get_redis().await {
+            let _: Result<(), _> = conn.del(format!("wou_clan:{clean_tag}")).await;
+        }
+
+        Ok(())
+    }
+
+    pub async fn leave_clan(&self, tag: &str, account_id: &str) -> Result<(), WouError> {
+        let clean_tag = tag.trim().to_uppercase();
+        let member_key = format!("{clean_tag}:{account_id}");
+
+        let write_txn = self
+            .redb
+            .begin_write()
+            .map_err(|e| WouError::DatabaseError(format!("Redb write txn failed: {e}")))?;
+        {
+            let mut members = write_txn
+                .open_table(CLAN_MEMBERS_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open clan members table failed: {e}")))?;
+
+            members.remove(member_key.as_str())
+                .map_err(|e| WouError::DatabaseError(format!("Remove member failed: {e}")))?;
+
+            let mut clans = write_txn
+                .open_table(CLANS_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open clans table failed: {e}")))?;
+
+            let existing_bytes = {
+                let entry_opt = clans.get(clean_tag.as_str()).map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                entry_opt.map(|entry| entry.value().to_vec())
+            };
+
+            if let Some(bytes) = existing_bytes {
+                let mut clan: Clan = serde_json::from_slice(&bytes)
+                    .map_err(|e| WouError::Internal(format!("Clan parse failed: {e}")))?;
+
+                if clan.member_count > 1 {
+                    clan.member_count -= 1;
+                    let updated_bytes = serde_json::to_vec(&clan).unwrap_or_default();
+                    let _ = clans.insert(clean_tag.as_str(), updated_bytes.as_slice());
+                } else {
+                    // Last member left, remove clan
+                    let _ = clans.remove(clean_tag.as_str());
+                }
+            }
+        }
+        write_txn
+            .commit()
+            .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
+
+        // Invalidate Valkey cache
+        if let Ok(mut conn) = self.get_redis().await {
+            let _: Result<(), _> = conn.del(format!("wou_clan:{clean_tag}")).await;
+        }
+
+        Ok(())
+    }
+
+    pub async fn list_clans(&self, limit: usize) -> Result<Vec<Clan>, WouError> {
+        let read_txn = self
+            .redb
+            .begin_read()
+            .map_err(|e| WouError::DatabaseError(format!("Redb read txn failed: {e}")))?;
+        let table = read_txn
+            .open_table(CLANS_TABLE)
+            .map_err(|e| WouError::DatabaseError(format!("Open clans table failed: {e}")))?;
+
+        let mut list = Vec::new();
+        for item in table.iter().map_err(|e| WouError::DatabaseError(format!("Iter failed: {e}")))? {
+            let (_, v) = item.map_err(|e| WouError::DatabaseError(format!("Entry failed: {e}")))?;
+            if let Ok(clan) = serde_json::from_slice::<Clan>(v.value()) {
+                list.push(clan);
+                if list.len() >= limit {
+                    break;
+                }
+            }
+        }
+
+        // Sort by member count descending
+        list.sort_by(|a, b| b.member_count.cmp(&a.member_count));
+
+        Ok(list)
+    }
+
+    // ==========================================
+    // PLAYER DISCOVERY & SEARCH
+    // ==========================================
+
+    pub async fn search_players(&self, query: &str, limit: usize) -> Result<Vec<PlayerSearchResult>, WouError> {
+        let clean = query.trim().trim_start_matches('@').to_lowercase();
+        if clean.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let read_txn = self
+            .redb
+            .begin_read()
+            .map_err(|e| WouError::DatabaseError(format!("Redb read txn failed: {e}")))?;
+        let table = read_txn
+            .open_table(PLAYERS_TABLE)
+            .map_err(|e| WouError::DatabaseError(format!("Open players table failed: {e}")))?;
+
+        let mut results = Vec::new();
+        for item in table.iter().map_err(|e| WouError::DatabaseError(format!("Iter failed: {e}")))? {
+            let (_, v) = item.map_err(|e| WouError::DatabaseError(format!("Entry failed: {e}")))?;
+            if let Ok(account) = serde_json::from_slice::<PlayerAccount>(v.value()) {
+                let matches_user = account.username.to_lowercase().contains(&clean);
+                let matches_name = account.display_name.to_lowercase().contains(&clean);
+
+                if matches_user || matches_name {
+                    let animal_emoji = account.profile.custom_attributes.get("animal_emoji")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+
+                    results.push(PlayerSearchResult {
+                        id: account.id,
+                        username: account.username,
+                        display_name: account.display_name,
+                        avatar_url: account.profile.avatar_url,
+                        animal_emoji,
+                        clan_tag: account.clan_tag,
+                    });
+
+                    if results.len() >= limit {
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok(results)
     }
 }
