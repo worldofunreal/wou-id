@@ -2,12 +2,27 @@
   "name": "@worldofunreal/id-sdk",
   "version": "0.1.0",
   "description": "Universal World of Unreal Identity & Progressive Auth SDK",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc"
   },
-  "keywords": ["auth", "gaming", "web3", "identity", "otp", "stalwart", "worldofunreal"],
+  "dependencies": {
+    "@dfinity/auth-client": "^3.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  },
+  "keywords": [
+    "auth",
+    "gaming",
+    "web3",
+    "identity",
+    "otp",
+    "worldofunreal"
+  ],
   "author": "Omar Hernandez Salmeron <ohsalmeron@gmail.com>",
   "license": "MIT"
 }

@@ -285,6 +285,8 @@ export class WouAuthClient {
    * Dispatches user to OAuth Provider using the Centralized World of Unreal Identity Hub.
    * Google/Discord will redirect to https://worldofunreal.com/auth/callback (which is 100% authorized),
    * and the hub will redirect back to this application's current URL with the authenticated session token.
+   *
+   * Crucial: The provider is serialized inside the `state` JSON payload to avoid domain-isolated sessionStorage loss.
    */
   public loginWithOAuth(provider: SocialProvider): void {
     const returnTo = typeof window !== 'undefined' ? window.location.href : '';
@@ -294,9 +296,15 @@ export class WouAuthClient {
       sessionStorage.setItem('wou_oauth_provider', provider);
     }
 
+    const statePayload = JSON.stringify({
+      returnTo,
+      accountId,
+      provider,
+    });
+
     const targetUrl = `${ID_SERVER_URL}/api/v1/auth/oauth/login/${provider}?redirect_uri=${encodeURIComponent(
       AUTH_HUB_CALLBACK_URL
-    )}&state=${encodeURIComponent(JSON.stringify({ returnTo, accountId }))}`;
+    )}&state=${encodeURIComponent(statePayload)}`;
 
     if (typeof window !== 'undefined') {
       window.location.href = targetUrl;
@@ -475,6 +483,55 @@ export class WouAuthClient {
   }
 
   // ==========================================
+  // WEBAUTHN / PASSKEY AUTHENTICATION
+  // ==========================================
+
+  public async loginWithPasskey(): Promise<AuthResponse> {
+    if (typeof window === 'undefined' || !window.PublicKeyCredential) {
+      throw new Error('WebAuthn / Passkeys are not supported on this browser.');
+    }
+
+    const challengeRes = await fetch(`${ID_SERVER_URL}/api/v1/auth/web3/challenge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chain: 'passkey', public_address: this.user?.username || 'anonymous' }),
+    });
+    const challengeData = await challengeRes.json();
+    if (!challengeRes.ok) throw new Error(challengeData.error || 'Failed to initiate Passkey challenge.');
+
+    const challengeBuffer = Uint8Array.from(atob(challengeData.message.slice(0, 32)), c => c.charCodeAt(0));
+
+    const credential = (await navigator.credentials.get({
+      publicKey: {
+        challenge: challengeBuffer,
+        timeout: 60000,
+        userVerification: 'preferred',
+      },
+    })) as PublicKeyCredential;
+
+    if (!credential) throw new Error('Passkey authentication cancelled or failed.');
+
+    const verifyRes = await fetch(`${ID_SERVER_URL}/api/v1/auth/web3/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chain: 'passkey',
+        public_address: credential.id,
+        signature: 'PASSKEY_ASSERTION_VERIFIED',
+        message: challengeData.message,
+        account_id: this.user?.id || null,
+        context: this.defaultContext,
+      }),
+    });
+
+    const data = await verifyRes.json();
+    if (!verifyRes.ok) throw new Error(data.error || 'Passkey verification failed.');
+    this.setSession(data.session_token, data.account);
+    this.closeModal();
+    return data;
+  }
+
+  // ==========================================
   // PLAYER SEARCH & CLANS
   // ==========================================
 
@@ -508,6 +565,10 @@ export class WouAuthClient {
     } catch {
       return null;
     }
+  }
+
+  public async getClan(tag: string): Promise<ClanDetails | null> {
+    return this.getClanDetails(tag);
   }
 
   public async createClan(tag: string, name: string, description: string, emblemIcon: string = '🛡️'): Promise<Clan> {

@@ -11,18 +11,20 @@ Para evitar errores de `redirect_uri_mismatch` en Google Cloud Console, Discord 
 ```
 [ frontend: cosmicrafts.com / nftropoly.com / localhost ]
                        │
-                       │  wouAuth.loginWithOAuth('google')
+                       │  wouAuth.loginWithOAuth('google' | 'discord')
                        ▼
         [ https://id.worldofunreal.com ]
                        │
                        │  redirect_uri = https://worldofunreal.com/auth/callback
+                       │  state = { returnTo, accountId, provider }
                        ▼
             [ Google / Discord / X ] (Acepta la URI autorizada)
                        │
-                       │  Redirect con Auth Code
+                       │  Redirect con Auth Code & State
                        ▼
    [ https://worldofunreal.com/auth/callback ] (Hub Central)
                        │
+                       │  Extrae provider y returnTo de state
                        │  Intercambia código, emite session_token y PlayerAccount
                        ▼
    [ Redirige a: https://cosmicrafts.com/profile?session_token=...&account=... ]
@@ -32,7 +34,7 @@ Para evitar errores de `redirect_uri_mismatch` en Google Cloud Console, Discord 
 ```
 
 > [!IMPORTANT]
-> **REGLA INVIOLABLE:** NUNCA envíes `window.location.origin/auth/callback` a Google u OAuth providers externos desde páginas satélite. El SDK ya utiliza automáticamente el Hub Central en `https://worldofunreal.com/auth/callback`.
+> **REGLA INVIOLABLE:** NUNCA envíes `window.location.origin/auth/callback` a Google u OAuth providers externos desde páginas satélite. El SDK ya utiliza automáticamente el Hub Central en `https://worldofunreal.com/auth/callback` empaquetando el proveedor y la URL de retorno en el parámetro `state`.
 
 ---
 
@@ -67,6 +69,9 @@ await wouAuth.loginWithEthereum(); // o alias wouAuth.loginWithEvm()
 await wouAuth.loginWithSolana();
 await wouAuth.loginWithInternetIdentity(); // o alias wouAuth.loginWithIcp()
 
+// WebAuthn / Passkeys
+await wouAuth.loginWithPasskey();
+
 // Cierre de Sesión
 wouAuth.logout();
 ```
@@ -78,7 +83,7 @@ const results = await wouAuth.searchPlayers('bizkit', 10);
 
 // Clanes
 const clans = await wouAuth.getClans(20);
-const details = await wouAuth.getClanDetails('SOW');
+const details = await wouAuth.getClanDetails('SOW'); // o alias wouAuth.getClan('SOW')
 await wouAuth.createClan('TAG', 'Clan Name', 'Description', '⚔️');
 await wouAuth.joinClan('TAG');
 await wouAuth.leaveClan('TAG');
@@ -105,17 +110,17 @@ jobs:
         with:
           node-version: '22'
           cache: 'npm'
-      - run: npm ci || npm install
+      - run: npm install
       - run: npm run build
-      - uses: webfactory/ssh-agent@v0.10.0
+      - uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
-      - name: Deploy to IONOS
-        run: |
+      - run: |
           mkdir -p ~/.ssh
-          ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
-          rsync -avz --delete dist/ ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/var/www/<DOMINIO>/dist/
+          ssh-keyscan -H -T 10 ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
+      - run: |
+          rsync -avz --delete -e "ssh -o StrictHostKeyChecking=no" dist/ ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/var/www/<domain>/dist/
 ```
 
 > [!WARNING]
-> Prohibido inventar despliegues manuales con `scp` o modificar servicios sin backup. Si un deploy falla, el pipeline es ley.
+> Prohibido realizar `rsync` manual o comandos SSH ad-hoc para despliegues de frontend. Toda entrega debe pasar por GitHub Actions.
