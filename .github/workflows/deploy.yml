@@ -1,0 +1,98 @@
+name: Deploy WOU-ID Engine to IONOS VPS
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-sdk:
+    name: Build & Validate TypeScript SDK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'ts-sdk/package-lock.json'
+
+      - name: Install SDK Dependencies
+        working-directory: ts-sdk
+        run: npm install
+
+      - name: Compile SDK (tsc)
+        working-directory: ts-sdk
+        run: npm run build
+
+  deploy-server:
+    name: Build & Deploy Rust Backend to FreeBSD
+    runs-on: ubuntu-latest
+    needs: validate-sdk
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run Local Workspace Tests
+        run: cargo test --workspace
+
+      - name: Setup SSH Agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add Server to Known Hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H -T 10 ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Sync Source Code to Build Directory
+        run: |
+          rsync -avz --delete \
+            -e "ssh -o StrictHostKeyChecking=no" \
+            --exclude "target" \
+            --exclude ".git" \
+            --exclude "ts-sdk/node_modules" \
+            ./ ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:~/.wou-id-build/
+
+      - name: Compile and Install Binary on FreeBSD Host
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << 'EOF'
+            set -e
+            echo "[1/4] Compiling release binary on FreeBSD 15.1..."
+            cd ~/.wou-id-build
+            cargo build --release --bin wou-server
+
+            echo "[2/4] Backing up existing binary..."
+            if [ -f /usr/local/libexec/wou-server ]; then
+              sudo cp /usr/local/libexec/wou-server /usr/local/libexec/wou-server.bak_$(date +%s)
+            fi
+
+            echo "[3/4] Installing updated binary..."
+            sudo install -o sowdb -g sow -m 755 ~/.wou-id-build/target/release/wou-server /usr/local/libexec/wou-server
+
+            echo "[4/4] Restarting wou_id service..."
+            sudo service wou_id restart
+          EOF
+
+      - name: Verify Backend Health
+        run: |
+          sleep 2
+          response=$(curl -s -f https://id.worldofunreal.com/health)
+          echo "Health Response: $response"
+          if echo "$response" | grep -q "Online"; then
+            echo "WOU-ID Identity Engine is live and healthy!"
+          else
+            echo "Health verification failed: $response"
+            exit 1
+          fi
