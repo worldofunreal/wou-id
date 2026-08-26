@@ -107,24 +107,40 @@ impl OAuthManager {
             ("redirect_uri", redirect_uri),
         ];
 
-        let token_resp: DiscordTokenResp = self
+        let res = self
             .http
             .post("https://discord.com/api/v10/oauth2/token")
             .form(&params)
             .send()
             .await
-            .map_err(|e| WouError::ProviderVerificationFailed(format!("Discord token exchange HTTP error: {e}")))?
+            .map_err(|e| WouError::ProviderVerificationFailed(format!("Discord token HTTP error: {e}")))?;
+
+        if !res.status().is_success() {
+            let status = res.status();
+            let body = res.text().await.unwrap_or_default();
+            return Err(WouError::ProviderVerificationFailed(format!("Discord token exchange rejected ({status}): {body}")));
+        }
+
+        let token_resp: DiscordTokenResp = res
             .json()
             .await
             .map_err(|e| WouError::ProviderVerificationFailed(format!("Discord token JSON parse error: {e}")))?;
 
-        let user_resp: DiscordUserResp = self
+        let user_res = self
             .http
             .get("https://discord.com/api/v10/users/@me")
             .bearer_auth(&token_resp.access_token)
             .send()
             .await
-            .map_err(|e| WouError::ProviderVerificationFailed(format!("Discord userinfo HTTP error: {e}")))?
+            .map_err(|e| WouError::ProviderVerificationFailed(format!("Discord userinfo HTTP error: {e}")))?;
+
+        if !user_res.status().is_success() {
+            let status = user_res.status();
+            let body = user_res.text().await.unwrap_or_default();
+            return Err(WouError::ProviderVerificationFailed(format!("Discord userinfo rejected ({status}): {body}")));
+        }
+
+        let user_resp: DiscordUserResp = user_res
             .json()
             .await
             .map_err(|e| WouError::ProviderVerificationFailed(format!("Discord userinfo JSON parse error: {e}")))?;
@@ -170,27 +186,43 @@ impl OAuthManager {
             ("redirect_uri", redirect_uri),
         ];
 
-        let token_resp: GoogleTokenResp = self
+        let res = self
             .http
             .post("https://oauth2.googleapis.com/token")
             .form(&params)
             .send()
             .await
-            .map_err(|e| WouError::ProviderVerificationFailed(format!("Google token exchange error: {e}")))?
+            .map_err(|e| WouError::ProviderVerificationFailed(format!("Google token HTTP error: {e}")))?;
+
+        if !res.status().is_success() {
+            let status = res.status();
+            let body = res.text().await.unwrap_or_default();
+            return Err(WouError::ProviderVerificationFailed(format!("Google token exchange rejected ({status}): {body}")));
+        }
+
+        let token_resp: GoogleTokenResp = res
             .json()
             .await
-            .map_err(|e| WouError::ProviderVerificationFailed(format!("Google token parse error: {e}")))?;
+            .map_err(|e| WouError::ProviderVerificationFailed(format!("Google token JSON parse error: {e}")))?;
 
-        let user_resp: GoogleUserResp = self
+        let user_res = self
             .http
             .get("https://openidconnect.googleapis.com/v1/userinfo")
             .bearer_auth(&token_resp.access_token)
             .send()
             .await
-            .map_err(|e| WouError::ProviderVerificationFailed(format!("Google userinfo error: {e}")))?
+            .map_err(|e| WouError::ProviderVerificationFailed(format!("Google userinfo HTTP error: {e}")))?;
+
+        if !user_res.status().is_success() {
+            let status = user_res.status();
+            let body = user_res.text().await.unwrap_or_default();
+            return Err(WouError::ProviderVerificationFailed(format!("Google userinfo rejected ({status}): {body}")));
+        }
+
+        let user_resp: GoogleUserResp = user_res
             .json()
             .await
-            .map_err(|e| WouError::ProviderVerificationFailed(format!("Google userinfo parse error: {e}")))?;
+            .map_err(|e| WouError::ProviderVerificationFailed(format!("Google userinfo JSON parse error: {e}")))?;
 
         Ok(OAuthUserInfo {
             provider: AuthProvider::Google,
@@ -227,36 +259,50 @@ impl OAuthManager {
         }
 
         let params = [
-            ("client_id", client_id),
-            ("client_secret", client_secret),
             ("grant_type", "authorization_code"),
             ("code", code),
             ("redirect_uri", redirect_uri),
             ("code_verifier", "challenge"),
         ];
 
-        let token_resp: TwitterTokenResp = self
+        let res = self
             .http
             .post("https://api.twitter.com/2/oauth2/token")
             .basic_auth(client_id, Some(client_secret))
             .form(&params)
             .send()
             .await
-            .map_err(|e| WouError::ProviderVerificationFailed(format!("Twitter token exchange error: {e}")))?
+            .map_err(|e| WouError::ProviderVerificationFailed(format!("Twitter token HTTP error: {e}")))?;
+
+        if !res.status().is_success() {
+            let status = res.status();
+            let body = res.text().await.unwrap_or_default();
+            return Err(WouError::ProviderVerificationFailed(format!("Twitter token exchange rejected ({status}): {body}")));
+        }
+
+        let token_resp: TwitterTokenResp = res
             .json()
             .await
-            .map_err(|e| WouError::ProviderVerificationFailed(format!("Twitter token parse error: {e}")))?;
+            .map_err(|e| WouError::ProviderVerificationFailed(format!("Twitter token JSON parse error: {e}")))?;
 
-        let user_resp: TwitterUserResp = self
+        let user_res = self
             .http
             .get("https://api.twitter.com/2/users/me?user.fields=profile_image_url")
             .bearer_auth(&token_resp.access_token)
             .send()
             .await
-            .map_err(|e| WouError::ProviderVerificationFailed(format!("Twitter userinfo error: {e}")))?
+            .map_err(|e| WouError::ProviderVerificationFailed(format!("Twitter userinfo HTTP error: {e}")))?;
+
+        if !user_res.status().is_success() {
+            let status = user_res.status();
+            let body = user_res.text().await.unwrap_or_default();
+            return Err(WouError::ProviderVerificationFailed(format!("Twitter userinfo rejected ({status}): {body}")));
+        }
+
+        let user_resp: TwitterUserResp = user_res
             .json()
             .await
-            .map_err(|e| WouError::ProviderVerificationFailed(format!("Twitter userinfo parse error: {e}")))?;
+            .map_err(|e| WouError::ProviderVerificationFailed(format!("Twitter userinfo JSON parse error: {e}")))?;
 
         Ok(OAuthUserInfo {
             provider: AuthProvider::Twitter,
@@ -291,30 +337,46 @@ impl OAuthManager {
             client_id, client_secret, urlencoding::encode(redirect_uri), code
         );
 
-        let token_resp: MetaTokenResp = self
+        let res = self
             .http
             .get(&url)
             .send()
             .await
-            .map_err(|e| WouError::ProviderVerificationFailed(format!("Meta token exchange error: {e}")))?
+            .map_err(|e| WouError::ProviderVerificationFailed(format!("Meta token HTTP error: {e}")))?;
+
+        if !res.status().is_success() {
+            let status = res.status();
+            let body = res.text().await.unwrap_or_default();
+            return Err(WouError::ProviderVerificationFailed(format!("Meta token exchange rejected ({status}): {body}")));
+        }
+
+        let token_resp: MetaTokenResp = res
             .json()
             .await
-            .map_err(|e| WouError::ProviderVerificationFailed(format!("Meta token parse error: {e}")))?;
+            .map_err(|e| WouError::ProviderVerificationFailed(format!("Meta token JSON parse error: {e}")))?;
 
         let user_url = format!(
             "https://graph.facebook.com/me?fields=id,name,email&access_token={}",
             token_resp.access_token
         );
 
-        let user_resp: MetaUserResp = self
+        let user_res = self
             .http
             .get(&user_url)
             .send()
             .await
-            .map_err(|e| WouError::ProviderVerificationFailed(format!("Meta userinfo error: {e}")))?
+            .map_err(|e| WouError::ProviderVerificationFailed(format!("Meta userinfo HTTP error: {e}")))?;
+
+        if !user_res.status().is_success() {
+            let status = user_res.status();
+            let body = user_res.text().await.unwrap_or_default();
+            return Err(WouError::ProviderVerificationFailed(format!("Meta userinfo rejected ({status}): {body}")));
+        }
+
+        let user_resp: MetaUserResp = user_res
             .json()
             .await
-            .map_err(|e| WouError::ProviderVerificationFailed(format!("Meta userinfo parse error: {e}")))?;
+            .map_err(|e| WouError::ProviderVerificationFailed(format!("Meta userinfo JSON parse error: {e}")))?;
 
         Ok(OAuthUserInfo {
             provider: AuthProvider::Meta,
