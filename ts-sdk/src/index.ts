@@ -304,11 +304,21 @@ export class WouAuthClient {
       sessionStorage.setItem('wou_oauth_provider', provider);
     }
 
-    const statePayload = JSON.stringify({
+    const stateObj = {
       returnTo,
       accountId,
       provider,
-    });
+    };
+
+    let statePayload = '';
+    try {
+      statePayload = btoa(unescape(encodeURIComponent(JSON.stringify(stateObj))))
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/, '');
+    } catch {
+      statePayload = encodeURIComponent(JSON.stringify(stateObj));
+    }
 
     const targetUrl = `${ID_SERVER_URL}/api/v1/auth/oauth/login/${provider}?redirect_uri=${encodeURIComponent(
       AUTH_HUB_CALLBACK_URL
