@@ -127,7 +127,7 @@ export class WouAuthClient {
     }
   }
 
-  private initSession(): void {
+  public initSession(): PlayerAccount | null {
     // 1. Check if returning from cross-domain SSO Hub with token in URL
     const urlParams = new URLSearchParams(window.location.search);
     const tokenFromUrl = urlParams.get('session_token');
@@ -144,7 +144,7 @@ export class WouAuthClient {
         const cleanSearch = urlParams.toString();
         const newUrl = window.location.pathname + (cleanSearch ? `?${cleanSearch}` : '') + window.location.hash;
         window.history.replaceState({}, document.title, newUrl);
-        return;
+        return this.user;
       } catch (err) {
         console.error('Failed to parse returning SSO account payload:', err);
       }
@@ -162,6 +162,14 @@ export class WouAuthClient {
         this.logout();
       }
     }
+    return this.user;
+  }
+
+  public loadSession(): PlayerAccount | null {
+    if (typeof window !== 'undefined') {
+      this.initSession();
+    }
+    return this.user;
   }
 
   public setSession(token: string, account: PlayerAccount): void {
