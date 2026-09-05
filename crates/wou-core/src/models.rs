@@ -213,6 +213,9 @@ pub struct PlayerAccount {
     /// Whether the user has opted in to the marketing newsletter.
     #[serde(default)]
     pub newsletter_opt_in: bool,
+    /// Whether the one-time welcome email was already sent (idempotency).
+    #[serde(default)]
+    pub welcome_sent: bool,
     /// Account classification.
     #[serde(default)]
     pub kind: AccountKind,
@@ -324,6 +327,7 @@ impl PlayerAccount {
             display_name: gen_name,
             email: None,
             newsletter_opt_in: false,
+            welcome_sent: false,
             kind: AccountKind::Human,
             embedded_wallets: wallets,
             game_stats: CrossGameProfile {

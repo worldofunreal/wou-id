@@ -101,6 +101,7 @@ mod tests {
             oauth: Arc::new(OAuthManager::new()),
             bots: Arc::new(crate::bots::BotClients::new()),
             otp_expiry_seconds: 600,
+            admin_alert_email: None,
         };
 
         // 1. Missing header

@@ -124,3 +124,130 @@ async fn test_full_account_lifecycle() {
     // Clean up temporary redb file
     let _ = std::fs::remove_file(tmp_db_path);
 }
+
+async fn live_storage() -> Option<WouStorage> {
+    live_storage_db(0).await
+}
+
+async fn live_storage_db(db: u8) -> Option<WouStorage> {
+    let tmp_db_path = format!("/tmp/wou_test_sec_{}.redb", uuid::Uuid::new_v4());
+    let url = format!("redis://127.0.0.1:6379/{db}");
+    let storage = WouStorage::new(&url, &tmp_db_path).ok()?;
+    // Constructor doesn't dial; probe with a no-op write.
+    if storage.set_protection_mode(false).await.is_err() {
+        eprintln!("Skipping security test: Redis not running locally");
+        return None;
+    }
+    Some(storage)
+}
+
+fn is_throttled(e: &wou_core::WouError) -> bool {
+    matches!(e, wou_core::WouError::OtpThrottled(_))
+}
+
+/// Ladder: 3/15min OK, 4th throttled, >6/30min penalized, reoffense banned.
+#[tokio::test]
+async fn test_otp_abuse_ladder() {
+    let Some(storage) = live_storage().await else { return };
+    let email = format!("ladder_{}@worldofunreal.com", uuid::Uuid::new_v4());
+    for _ in 0..3 {
+        storage.tally_otp_request(&email).await.unwrap();
+    }
+    assert!(is_throttled(&storage.tally_otp_request(&email).await.unwrap_err()));
+
+    let email2 = format!("abuse_{}@worldofunreal.com", uuid::Uuid::new_v4());
+    for _ in 0..3 {
+        storage.tally_otp_request(&email2).await.unwrap();
+    }
+    // Tallies 4-6: throttled but still counting abuse pressure.
+    for _ in 0..3 {
+        assert!(is_throttled(&storage.tally_otp_request(&email2).await.unwrap_err()));
+    }
+    // 7th: 24h penalty.
+    assert!(matches!(
+        storage.tally_otp_request(&email2).await.unwrap_err(),
+        wou_core::WouError::OtpPenalized(_)
+    ));
+    // Any request during penalty: ban.
+    assert!(matches!(
+        storage.tally_otp_request(&email2).await.unwrap_err(),
+        wou_core::WouError::EmailBanned
+    ));
+    // Ban sticks.
+    assert!(matches!(
+        storage.tally_otp_request(&email2).await.unwrap_err(),
+        wou_core::WouError::EmailBanned
+    ));
+}
+
+/// 5 wrong guesses burn the code; a correct guess still works before that.
+#[tokio::test]
+async fn test_guess_burn() {
+    let Some(storage) = live_storage().await else { return };
+    let email = format!("guess_{}@worldofunreal.com", uuid::Uuid::new_v4());
+    let otp = PendingOtp {
+        code: "123456".to_string(),
+        account_id: None,
+        email: email.clone(),
+        context: GameContext::WorldOfUnreal,
+        newsletter_opt_in: false,
+        requested_at: chrono::Utc::now().timestamp() as u64,
+    };
+    storage.save_pending_otp(&otp, 600).await.unwrap();
+    for _ in 0..5 {
+        assert!(storage.get_and_consume_otp(&email, "000000").await.is_err());
+    }
+    // Burned: even the right code fails now.
+    assert!(storage.get_and_consume_otp(&email, "123456").await.is_err());
+
+    let otp2 = PendingOtp { code: "654321".to_string(), ..otp.clone() };
+    storage.save_pending_otp(&otp2, 600).await.unwrap();
+    assert!(storage.get_and_consume_otp(&email, "000000").await.is_err());
+    let consumed = storage.get_and_consume_otp(&email, "654321").await.unwrap();
+    assert_eq!(consumed.code, "654321");
+}
+
+/// Per-IP ceilings: 100/hr, 300/day; 101st blocked, block sticks.
+#[tokio::test]
+async fn test_ip_throttle() {
+    let Some(storage) = live_storage().await else { return };
+    let ip = format!("10.9.9.{}", rand_octet());
+    for _ in 0..100 {
+        storage.tally_ip(&ip).await.unwrap();
+    }
+    assert!(matches!(
+        storage.tally_ip(&ip).await.unwrap_err(),
+        wou_core::WouError::IpBlocked
+    ));
+    assert!(matches!(
+        storage.tally_ip(&ip).await.unwrap_err(),
+        wou_core::WouError::IpBlocked
+    ));
+}
+
+fn rand_octet() -> u8 {
+    (uuid::Uuid::new_v4().as_bytes()[0] % 200) + 10
+}
+
+/// Protection mode toggles intake gating.
+#[tokio::test]
+async fn test_protection_mode() {
+    let Some(storage) = live_storage_db(7).await else { return };
+    assert!(!storage.protection_mode().await);
+    storage.set_protection_mode(true).await.unwrap();
+    assert!(storage.protection_mode().await);
+    storage.set_protection_mode(false).await.unwrap();
+    assert!(!storage.protection_mode().await);
+}
+
+/// Welcome + alert templates render without PII leaks in subject.
+#[test]
+fn test_security_templates() {
+    let w = wou_mail::templates::render_welcome_email(GameContext::Cosmicrafts, "Commander X");
+    assert!(w.subject.contains("Cosmicrafts"));
+    assert!(w.html_body.contains("Commander X"));
+    assert!(w.html_body.contains("security@worldofunreal.com"));
+    assert!(w.html_body.contains("one-time"));
+    let a = wou_mail::templates::render_admin_alert("Email banned", "tag=abc error=x");
+    assert!(a.subject.starts_with("[WOU-ALERT]"));
+}

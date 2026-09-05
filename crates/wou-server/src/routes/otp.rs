@@ -1,9 +1,10 @@
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{extract::State, http::HeaderMap, http::StatusCode, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 use tracing::info;
-use wou_core::{AuthProvider, GameContext, PendingOtp, PlayerAccount};
+use wou_core::{AuthProvider, GameContext, PendingOtp, PlayerAccount, WouError};
 use wou_crypto::generate_secure_otp;
 
+use crate::routes::guard::{client_ip, fire_admin_alert_once, log_tag};
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -30,6 +31,7 @@ pub struct OtpRequestResponse {
 
 pub async fn handle_request_otp(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<OtpRequestPayload>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     let clean_email = payload.email.trim().to_lowercase();
@@ -42,12 +44,64 @@ pub async fn handle_request_otp(
         ));
     }
 
-    // Check rate limit (1 request per 60 seconds)
-    if let Err(e) = state.storage.check_otp_rate_limit(&clean_email).await {
+    // Global protection mode (botnet response): pause new intake, keep sessions alive.
+    if state.storage.protection_mode().await {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "Service in protection mode, try again later"})),
+        ));
+    }
+
+    // Per-IP gate (NAT-friendly ceilings; blocks alert once per day).
+    let ip = client_ip(&headers);
+    if let Err(e) = state.storage.tally_ip(&ip).await {
+        fire_admin_alert_once(
+            &state,
+            &format!("ip:{ip}"),
+            "IP blocked for OTP abuse",
+            format!("ip={ip} error={e}"),
+        )
+        .await;
         return Err((
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": e.to_string()})),
         ));
+    }
+
+    // Per-email abuse ladder (3/15min, >6/30min -> 24h, reoffense -> ban).
+    if let Err(e) = state.storage.tally_otp_request(&clean_email).await {
+        let tag = log_tag(&clean_email);
+        let status = match &e {
+            WouError::EmailBanned => {
+                fire_admin_alert_once(
+                    &state,
+                    &format!("ban:{tag}"),
+                    "Email banned for OTP abuse",
+                    format!("tag={tag} error={e}"),
+                )
+                .await;
+                StatusCode::FORBIDDEN
+            }
+            WouError::OtpPenalized(_) => {
+                fire_admin_alert_once(
+                    &state,
+                    &format!("penalty:{tag}"),
+                    "Email penalized 24h for OTP abuse",
+                    format!("tag={tag} error={e}"),
+                )
+                .await;
+                StatusCode::TOO_MANY_REQUESTS
+            }
+            _ => StatusCode::TOO_MANY_REQUESTS,
+        };
+        let mut body = serde_json::json!({"error": e.to_string()});
+        match &e {
+            WouError::OtpThrottled(s) | WouError::OtpPenalized(s) => {
+                body["retry_after_seconds"] = (*s).into();
+            }
+            _ => {}
+        }
+        return Err((status, Json(body)));
     }
 
     // Generate 6-digit OTP
@@ -76,7 +130,7 @@ pub async fn handle_request_otp(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
 
-    info!("OTP request processed successfully for email {}", clean_email);
+    info!("OTP request ok tag={}", log_tag(&clean_email));
 
     Ok(Json(OtpRequestResponse {
         status: "success",
@@ -124,7 +178,7 @@ pub async fn handle_verify_otp(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
 
-    let (final_account, is_new) = if let Some(mut existing_account) = existing_account_opt {
+    let (mut final_account, is_new) = if let Some(mut existing_account) = existing_account_opt {
         // Case 1: Account already exists with this email -> Login / Restore
         existing_account.newsletter_opt_in = pending.newsletter_opt_in || existing_account.newsletter_opt_in;
         existing_account.updated_at = chrono::Utc::now().timestamp() as u64;
@@ -162,6 +216,24 @@ pub async fn handle_verify_otp(
         (account, true)
     };
 
+    // One-time welcome for a verified email on a new account.
+    // Best-effort: welcome failure never fails auth; flag makes it idempotent.
+    if is_new && !final_account.welcome_sent {
+        if let Some(ref email) = final_account.email.clone() {
+            final_account.welcome_sent = true;
+            final_account.updated_at = chrono::Utc::now().timestamp() as u64;
+            if state.storage.save_account(&final_account).await.is_ok() {
+                let mailer = state.mailer.clone();
+                let ctx = payload.context;
+                let to = email.clone();
+                let name = final_account.display_name.clone();
+                tokio::spawn(async move {
+                    let _ = mailer.send_welcome(&to, ctx, &name).await;
+                });
+            }
+        }
+    }
+
     // Issue JWT session token
     let session_token = state
         .jwt
@@ -175,8 +247,9 @@ pub async fn handle_verify_otp(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
 
     info!(
-        "OTP verification successful for account {} (email: {})",
-        final_account.id, clean_email
+        "OTP verification successful for account {} (tag: {})",
+        final_account.id,
+        log_tag(&clean_email)
     );
 
     Ok(Json(OtpVerifyResponse {

@@ -119,7 +119,7 @@ pub async fn handle_oauth_callback(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
 
-    let (final_account, is_new) = if let Some(mut existing) = existing_by_identity {
+    let (mut final_account, is_new) = if let Some(mut existing) = existing_by_identity {
         if let Some(ref avatar) = user_info.avatar_url {
             existing.profile.avatar_url = Some(avatar.clone());
         }
@@ -163,6 +163,24 @@ pub async fn handle_oauth_callback(
 
         (account, true)
     };
+
+    // One-time welcome when the provider supplied an email (provider-verified).
+    // Best-effort: welcome failure never fails auth; flag makes it idempotent.
+    if is_new && !final_account.welcome_sent {
+        if let Some(ref email) = final_account.email.clone() {
+            final_account.welcome_sent = true;
+            final_account.updated_at = chrono::Utc::now().timestamp() as u64;
+            if state.storage.save_account(&final_account).await.is_ok() {
+                let mailer = state.mailer.clone();
+                let ctx = payload.context;
+                let to = email.clone();
+                let name = final_account.display_name.clone();
+                tokio::spawn(async move {
+                    let _ = mailer.send_welcome(&to, ctx, &name).await;
+                });
+            }
+        }
+    }
 
     let session_token = state
         .jwt

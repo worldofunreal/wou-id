@@ -84,26 +84,137 @@ impl WouStorage {
             .await
             .map_err(|e| WouError::DatabaseError(format!("Redis SETEX failed: {e}")))?;
 
-        // Set rate-limiting key (1 OTP request per 60 seconds per email)
-        let rate_key = format!("wou_otp_rate:{}", otp.email.to_lowercase());
-        let _: () = conn.set_ex(&rate_key, "1", 60).await.unwrap_or(());
-
         Ok(())
     }
 
-    pub async fn check_otp_rate_limit(&self, email: &str) -> Result<(), WouError> {
-        let mut conn = self.get_redis().await?;
-        let rate_key = format!("wou_otp_rate:{}", email.to_lowercase());
-        let exists: bool = conn
-            .exists(&rate_key)
-            .await
-            .map_err(|e| WouError::DatabaseError(format!("Redis rate check failed: {e}")))?;
+    // OTP abuse ladder (all counters are best-effort Valkey TTLs, ~0.1ms each):
+    // 3 requests / 15 min per email, >6 / 30 min -> 24h penalty,
+    // any request during penalty -> 90d ban. 5 wrong guesses burn the code.
+    pub const OTP_REQ_MAX: u64 = 3;
+    pub const OTP_REQ_WINDOW_SECS: u64 = 900;
+    pub const OTP_ABUSE_MAX: u64 = 6;
+    pub const OTP_ABUSE_WINDOW_SECS: u64 = 1800;
+    pub const OTP_PENALTY_SECS: u64 = 86400;
+    pub const OTP_BAN_SECS: u64 = 90 * 86400;
+    pub const OTP_GUESS_MAX: u64 = 5;
+    // NAT-friendly per-IP limits (schools/offices share IPs; botnets don't).
+    pub const IP_REQ_HR_MAX: u64 = 100;
+    pub const IP_REQ_HR_WINDOW_SECS: u64 = 3600;
+    pub const IP_REQ_DAY_MAX: u64 = 300;
+    pub const IP_REQ_DAY_WINDOW_SECS: u64 = 86400;
+    /// Global protection mode flag: presence of this key pauses new OTP/anonymous intake.
+    /// Toggled live with `valkey-cli SET wou_protect_mode 1` / `DEL wou_protect_mode`.
+    pub const PROTECT_MODE_KEY: &str = "wou_protect_mode";
 
-        if exists {
-            let ttl: u64 = conn.ttl(&rate_key).await.unwrap_or(60);
-            return Err(WouError::RateLimitExceeded(ttl));
+    async fn incr_win(&self, key: &str, window_secs: u64) -> Result<u64, WouError> {
+        let mut conn = self.get_redis().await?;
+        let n: u64 = conn
+            .incr(key, 1)
+            .await
+            .map_err(|e| WouError::DatabaseError(format!("Redis INCR failed: {e}")))?;
+        if n == 1 {
+            let _: () = conn.expire(key, window_secs as i64).await.unwrap_or(());
+        }
+        Ok(n)
+    }
+
+    async fn ttl_of(&self, key: &str) -> u64 {
+        match self.get_redis().await {
+            Ok(mut conn) => conn.ttl(key).await.unwrap_or(60).max(1) as u64,
+            Err(_) => 60,
+        }
+    }
+
+    /// Gate an OTP request through the abuse ladder. Counts the attempt.
+    pub async fn tally_otp_request(&self, email: &str) -> Result<(), WouError> {
+        let em = email.to_lowercase();
+        let mut conn = self.get_redis().await?;
+        let ban_key = format!("wou_otp_ban:{em}");
+        let ban: bool = conn.exists(&ban_key).await.unwrap_or(false);
+        if ban {
+            return Err(WouError::EmailBanned);
+        }
+        let pen_key = format!("wou_otp_penalty:{em}");
+        let penalized: bool = conn.exists(&pen_key).await.unwrap_or(false);
+        if penalized {
+            // Reoffense during penalty -> ban.
+            let _: () = conn
+                .set_ex(&ban_key, "1", Self::OTP_BAN_SECS)
+                .await
+                .unwrap_or(());
+            return Err(WouError::EmailBanned);
+        }
+        drop(conn);
+
+        let abuse = self
+            .incr_win(&format!("wou_otp_abuse:{em}"), Self::OTP_ABUSE_WINDOW_SECS)
+            .await?;
+        if abuse > Self::OTP_ABUSE_MAX {
+            let mut conn = self.get_redis().await?;
+            let _: () = conn
+                .set_ex(&pen_key, "1", Self::OTP_PENALTY_SECS)
+                .await
+                .unwrap_or(());
+            return Err(WouError::OtpPenalized(Self::OTP_PENALTY_SECS as u64));
         }
 
+        let win_key = format!("wou_otp_window:{em}");
+        let n = self.incr_win(&win_key, Self::OTP_REQ_WINDOW_SECS).await?;
+        if n > Self::OTP_REQ_MAX {
+            return Err(WouError::OtpThrottled(self.ttl_of(&win_key).await));
+        }
+        Ok(())
+    }
+
+    /// Gate intake by client IP (NAT-friendly ceilings).
+    pub async fn tally_ip(&self, ip: &str) -> Result<(), WouError> {
+        let mut conn = self.get_redis().await?;
+        let block_key = format!("wou_ip_block:{ip}");
+        let blocked: bool = conn.exists(&block_key).await.unwrap_or(false);
+        if blocked {
+            return Err(WouError::IpBlocked);
+        }
+        drop(conn);
+        let hr = self
+            .incr_win(&format!("wou_ip_hr:{ip}"), Self::IP_REQ_HR_WINDOW_SECS)
+            .await?;
+        let day = self
+            .incr_win(&format!("wou_ip_day:{ip}"), Self::IP_REQ_DAY_WINDOW_SECS)
+            .await?;
+        if hr > Self::IP_REQ_HR_MAX || day > Self::IP_REQ_DAY_MAX {
+            if let Ok(mut conn) = self.get_redis().await {
+                let _: () = conn
+                    .set_ex(&block_key, "1", Self::OTP_PENALTY_SECS)
+                    .await
+                    .unwrap_or(());
+            }
+            return Err(WouError::IpBlocked);
+        }
+        Ok(())
+    }
+
+    /// True while the instance is in manual protection mode (botnet response).
+    pub async fn protection_mode(&self) -> bool {
+        match self.get_redis().await {
+            Ok(mut conn) => conn.exists(Self::PROTECT_MODE_KEY).await.unwrap_or(false),
+            Err(_) => false,
+        }
+    }
+
+    /// Toggle protection mode programmatically (ops use valkey-cli; tests use this).
+    pub async fn set_protection_mode(&self, on: bool) -> Result<(), WouError> {
+        let mut conn = self.get_redis().await?;
+        if on {
+            let _: () = conn
+                .set(Self::PROTECT_MODE_KEY, "1")
+                .await
+                .map_err(|e| WouError::DatabaseError(format!("Redis SET failed: {e}")))?;
+        } else {
+            let _: () = conn
+                .del(Self::PROTECT_MODE_KEY)
+                .await
+                .map_err(|e| WouError::DatabaseError(format!("Redis DEL failed: {e}")))?;
+        }
         Ok(())
     }
 
@@ -123,11 +234,27 @@ impl WouStorage {
             .map_err(|e| WouError::Internal(format!("OTP parse error: {e}")))?;
 
         if pending.code != code {
+            // Wrong guess: count it, feed the same abuse ladder (organic link),
+            // and burn the code after OTP_GUESS_MAX failures.
+            let em = email.to_lowercase();
+            let fail_key = format!("wou_otp_fail:{em}");
+            let fails = self.incr_win(&fail_key, 600).await.unwrap_or(1);
+            let _ = self
+                .incr_win(&format!("wou_otp_abuse:{em}"), Self::OTP_ABUSE_WINDOW_SECS)
+                .await;
+            if fails >= Self::OTP_GUESS_MAX {
+                let _: () = conn.del(&key).await.unwrap_or(());
+                let _: () = conn.del(&fail_key).await.unwrap_or(());
+            }
             return Err(WouError::InvalidOrExpiredOtp);
         }
 
-        // Consume OTP (Delete from Redis)
+        // Consume OTP (Delete from Redis) + reset guess counter.
         let _: () = conn.del(&key).await.unwrap_or(());
+        let _: () = conn
+            .del(format!("wou_otp_fail:{}", email.to_lowercase()))
+            .await
+            .unwrap_or(());
 
         Ok(pending)
     }

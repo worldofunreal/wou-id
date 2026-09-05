@@ -86,6 +86,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()
         .unwrap_or(600);
 
+    // Optional ops inbox for abuse alerts (unset = log-only, never fail boot).
+    let admin_alert_email = std::env::var("WOU_ADMIN_ALERT_EMAIL")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+
     // 3. Initialize Storage, Stalwart Mailer, and OAuth Manager
     let storage = WouStorage::new(&redis_url, &redb_path)?;
     let mailer_config = StalwartMailerConfig {
@@ -110,6 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         oauth,
         bots,
         otp_expiry_seconds,
+        admin_alert_email,
     };
 
     // 4. Configure CORS & Routes
