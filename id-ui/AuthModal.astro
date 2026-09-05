@@ -1,0 +1,498 @@
+---
+import { WOUID_BRAND_NAME } from '@worldofunreal/id-sdk';
+
+interface Props {
+  gameLogo?: string;
+  gameName?: string;
+  brandLogo?: string;
+  brandName?: string;
+  title?: string;
+  subtitle?: string;
+}
+
+const {
+  gameLogo = '/logo.svg',
+  gameName = 'World of Unreal',
+  brandLogo = '/wouid.svg',
+  brandName = WOUID_BRAND_NAME,
+  title = `Sign in to ${gameName}`,
+  subtitle = 'Sign in to access your player profile, games, and items.',
+} = Astro.props;
+---
+
+<div id="wou-auth-modal" class="hidden fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+  <div class="relative w-full max-w-md bg-zinc-950/95 border border-white/15 rounded-3xl shadow-[0_0_60px_rgba(0,0,0,0.9)] p-6 sm:p-8 overflow-hidden text-white animate-in">
+    <!-- Glow Elements -->
+    <div class="absolute -top-24 -right-24 w-48 h-48 bg-purple-500/20 rounded-full blur-3xl pointer-events-none"></div>
+    <div class="absolute -bottom-24 -left-24 w-48 h-48 bg-cyan-500/20 rounded-full blur-3xl pointer-events-none"></div>
+
+    <!-- Modal Header -->
+    <div class="flex items-center justify-between mb-6">
+      <div class="flex items-center gap-3">
+        <img src={gameLogo} alt={gameName} class="h-6 w-auto" />
+        <img src={brandLogo} alt={brandName} class="h-5 w-auto border-l border-white/10 pl-3" />
+        <span class="text-xs font-mono text-zinc-400 uppercase tracking-widest">
+          {brandName}
+        </span>
+      </div>
+      <button id="modal-close-btn" type="button" class="text-zinc-400 hover:text-white p-2 rounded-full hover:bg-white/10 transition-colors" aria-label="Close">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <!-- Title / Subtitle -->
+    <div class="mb-6">
+      <h2 id="modal-title" class="text-2xl font-bold tracking-tight text-white">{title}</h2>
+      <p id="modal-subtitle" class="text-sm text-zinc-400 mt-1">
+        {subtitle}
+      </p>
+    </div>
+
+    <!-- Alert / Error Banner -->
+    <div id="modal-error" class="hidden mb-5 p-3.5 rounded-xl bg-red-500/10 border border-red-500/30 text-red-400 text-xs flex items-center gap-2">
+      <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+      <span id="modal-error-msg"></span>
+    </div>
+
+    <!-- Tab Selector -->
+    <div id="modal-tabs" class="flex p-1 bg-zinc-900/80 border border-white/10 rounded-2xl mb-6">
+      <button id="tab-btn-email" type="button" class="flex-1 py-2 text-xs font-semibold rounded-xl bg-white text-zinc-950 shadow-md transition-all">
+        Email OTP
+      </button>
+      <button id="tab-btn-social" type="button" class="flex-1 py-2 text-xs font-semibold rounded-xl text-zinc-400 hover:text-white transition-all">
+        Social Accounts
+      </button>
+      <button id="tab-btn-web3" type="button" class="flex-1 py-2 text-xs font-semibold rounded-xl text-zinc-400 hover:text-white transition-all">
+        Web3 Wallets
+      </button>
+    </div>
+
+        <!-- QR SIGN-IN (same flow everywhere: scan, approve on phone, this device enters) -->
+    <div id="qr-box" class="mb-5 p-3 rounded-xl border border-white/10 bg-white/[0.03] flex items-center gap-3">
+      <div id="qr-idle" class="flex-1 flex items-center gap-2">
+        <div class="flex-1">
+          <div class="text-xs font-bold text-white">Scan to sign in</div>
+          <input id="qr-user" placeholder="@username for push (optional)" class="mt-1 w-full px-2 py-1 rounded-lg bg-black/40 border border-white/10 text-[11px] font-mono text-white placeholder-zinc-600 focus:outline-none" />
+        </div>
+        <button id="qr-start" type="button" class="px-3 py-1.5 rounded-lg bg-white text-zinc-950 text-xs font-bold hover:bg-zinc-200 transition-all cursor-pointer">Show link</button>
+      </div>
+      <div id="qr-view" class="hidden flex-1">
+        <div class="text-xs font-bold text-white">Open on your phone</div>
+        <div class="flex items-center gap-2 mt-1">
+          <input id="qr-link" readonly class="flex-1 px-2 py-1 rounded-lg bg-black/40 border border-white/10 text-[11px] font-mono text-zinc-300 focus:outline-none" />
+          <button id="qr-copy" type="button" class="px-3 py-1 rounded-lg bg-zinc-900 border border-white/15 text-white text-[11px] font-bold hover:bg-zinc-800 transition-all cursor-pointer">Copy</button>
+        </div>
+        <div class="flex items-center gap-2 mt-1.5">
+          <span id="qr-timer" class="text-[11px] font-mono text-zinc-500"></span>
+          <button id="qr-cancel" type="button" class="text-[11px] text-zinc-400 hover:text-white ml-auto">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 1: EMAIL OTP -->
+    <div id="tab-content-email">
+      <!-- Step 1: Input Email Form -->
+      <form id="form-request-otp" class="space-y-4">
+        <div>
+          <label for="wou-input-email" class="block text-xs font-mono uppercase tracking-wider text-zinc-400 mb-2">
+            Player Email Address
+          </label>
+          <input
+            id="wou-input-email"
+            type="email"
+            required
+            placeholder="name@example.com"
+            class="w-full px-4 py-3 rounded-xl bg-zinc-900/90 border border-white/15 text-white placeholder-zinc-500 text-sm focus:outline-none focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400 transition-all"
+          />
+        </div>
+
+        <div class="flex items-center gap-2 pt-1">
+          <input id="wou-input-newsletter" type="checkbox" checked class="w-4 h-4 rounded bg-zinc-900 border-white/20 text-cyan-500 focus:ring-cyan-400 cursor-pointer" />
+          <label for="wou-input-newsletter" class="text-xs text-zinc-400 cursor-pointer select-none">
+            Subscribe to monthly studio updates & patch notes
+          </label>
+        </div>
+
+        <button
+          id="btn-submit-email"
+          type="submit"
+          class="w-full py-3.5 px-4 mt-2 rounded-xl bg-white text-zinc-950 font-bold text-sm hover:bg-zinc-200 transition-all flex items-center justify-center gap-2 shadow-lg cursor-pointer"
+        >
+          <span>Send Verification Code</span>
+        </button>
+      </form>
+
+      <!-- Step 2: 6-Digit OTP Form -->
+      <form id="form-verify-otp" class="hidden space-y-5">
+        <div>
+          <label class="block text-xs font-mono uppercase tracking-wider text-zinc-400 mb-3 text-center">
+            6-Digit Security Code
+          </label>
+          <div class="flex justify-between gap-2">
+            <input type="text" inputmode="numeric" maxlength="1" class="otp-digit w-12 h-14 text-center text-xl font-mono font-bold bg-zinc-900 border border-white/20 rounded-xl focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 text-white" />
+            <input type="text" inputmode="numeric" maxlength="1" class="otp-digit w-12 h-14 text-center text-xl font-mono font-bold bg-zinc-900 border border-white/20 rounded-xl focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 text-white" />
+            <input type="text" inputmode="numeric" maxlength="1" class="otp-digit w-12 h-14 text-center text-xl font-mono font-bold bg-zinc-900 border border-white/20 rounded-xl focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 text-white" />
+            <input type="text" inputmode="numeric" maxlength="1" class="otp-digit w-12 h-14 text-center text-xl font-mono font-bold bg-zinc-900 border border-white/20 rounded-xl focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 text-white" />
+            <input type="text" inputmode="numeric" maxlength="1" class="otp-digit w-12 h-14 text-center text-xl font-mono font-bold bg-zinc-900 border border-white/20 rounded-xl focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 text-white" />
+            <input type="text" inputmode="numeric" maxlength="1" class="otp-digit w-12 h-14 text-center text-xl font-mono font-bold bg-zinc-900 border border-white/20 rounded-xl focus:outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/20 text-white" />
+          </div>
+        </div>
+
+        <button
+          id="btn-submit-otp"
+          type="submit"
+          class="w-full py-3.5 px-4 rounded-xl bg-cyan-400 text-zinc-950 font-bold text-sm hover:bg-cyan-300 transition-all flex items-center justify-center gap-2 shadow-lg cursor-pointer"
+        >
+          <span>Verify & Continue</span>
+        </button>
+
+        <div class="flex items-center justify-between text-xs text-zinc-400 pt-2">
+          <button id="btn-change-email" type="button" class="hover:text-white transition-colors cursor-pointer">
+            ← Change Email
+          </button>
+          <button id="btn-resend-otp" type="button" class="text-cyan-400 hover:underline cursor-pointer">
+            Resend Code
+          </button>
+        </div>
+      </form>
+    </div>
+
+    <!-- TAB 2: SOCIAL ACCOUNTS -->
+    <div id="tab-content-social" class="hidden space-y-3">
+      <button data-provider="discord" class="social-btn w-full py-3 px-4 rounded-xl bg-[#5865F2]/15 border border-[#5865F2]/30 hover:bg-[#5865F2]/25 text-white text-sm font-semibold flex items-center justify-between transition-all group cursor-pointer">
+        <div class="flex items-center gap-3">
+          <svg class="w-5 h-5 fill-current text-[#5865F2]" viewBox="0 0 24 24"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994.021-.041.001-.09-.041-.106a13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.061 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.894.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.028zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/></svg>
+          <span>Continue with Discord</span>
+        </div>
+        <span class="text-xs text-zinc-500 font-mono group-hover:text-white transition-colors">Instant</span>
+      </button>
+
+      <button data-provider="google" class="social-btn w-full py-3 px-4 rounded-xl bg-zinc-900 border border-white/15 hover:bg-zinc-800 text-white text-sm font-semibold flex items-center justify-between transition-all group cursor-pointer">
+        <div class="flex items-center gap-3">
+          <svg class="w-5 h-5" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/></svg>
+          <span>Continue with Google</span>
+        </div>
+        <span class="text-xs text-zinc-500 font-mono group-hover:text-white transition-colors">Instant</span>
+      </button>
+
+      <button data-provider="twitter" class="social-btn w-full py-3 px-4 rounded-xl bg-zinc-900 border border-white/15 hover:bg-zinc-800 text-white text-sm font-semibold flex items-center justify-between transition-all group cursor-pointer">
+        <div class="flex items-center gap-3">
+          <svg class="w-5 h-5 fill-current" viewBox="0 0 24 24"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+          <span>Continue with X</span>
+        </div>
+        <span class="text-xs text-zinc-500 font-mono group-hover:text-white transition-colors">Instant</span>
+      </button>
+
+      <button data-provider="meta" class="social-btn w-full py-3 px-4 rounded-xl bg-[#0081FB]/15 border border-[#0081FB]/30 hover:bg-[#0081FB]/25 text-white text-sm font-semibold flex items-center justify-between transition-all group cursor-pointer">
+        <div class="flex items-center gap-3">
+          <svg class="w-5 h-5 fill-current text-[#0081FB]" viewBox="0 0 24 24"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg>
+          <span>Continue with Meta</span>
+        </div>
+        <span class="text-xs text-zinc-500 font-mono group-hover:text-white transition-colors">Instant</span>
+      </button>
+    </div>
+
+    <!-- TAB 3: WEB3 WALLETS -->
+    <div id="tab-content-web3" class="hidden space-y-3">
+      <button id="web3-solana" class="w-full py-3 px-4 rounded-xl bg-[#AB9FF2]/15 border border-[#AB9FF2]/30 hover:bg-[#AB9FF2]/25 text-white text-sm font-semibold flex items-center justify-between transition-all cursor-pointer">
+        <div class="flex items-center gap-3">
+          <div class="w-5 h-5 rounded-full bg-[#AB9FF2] flex items-center justify-center font-bold text-zinc-950 text-xs">S</div>
+          <span>Solana (Phantom / Backpack)</span>
+        </div>
+        <span class="text-xs text-cyan-400 font-mono">Web3</span>
+      </button>
+
+      <button id="web3-evm" class="w-full py-3 px-4 rounded-xl bg-[#F6851B]/15 border border-[#F6851B]/30 hover:bg-[#F6851B]/25 text-white text-sm font-semibold flex items-center justify-between transition-all cursor-pointer">
+        <div class="flex items-center gap-3">
+          <div class="w-5 h-5 rounded-full bg-[#F6851B] flex items-center justify-center font-bold text-zinc-950 text-xs">Ξ</div>
+          <span>Ethereum / EVM (MetaMask)</span>
+        </div>
+        <span class="text-xs text-cyan-400 font-mono">Web3</span>
+      </button>
+
+      <button id="web3-icp" class="w-full py-3 px-4 rounded-xl bg-[#29ABE2]/15 border border-[#29ABE2]/30 hover:bg-[#29ABE2]/25 text-white text-sm font-semibold flex items-center justify-between transition-all cursor-pointer">
+        <div class="flex items-center gap-3">
+          <div class="w-5 h-5 rounded-full bg-[#29ABE2] flex items-center justify-center font-bold text-zinc-950 text-xs">∞</div>
+          <span>Internet Identity (id.ai)</span>
+        </div>
+        <span class="text-xs text-cyan-400 font-mono">ICP</span>
+      </button>
+    </div>
+
+    <!-- Footer Notice -->
+    <div class="mt-6 pt-4 border-t border-white/10 text-center">
+      <p class="text-[11px] font-mono text-zinc-500">
+        {gameName} Account Services
+      </p>
+    </div>
+  </div>
+</div>
+
+<script>
+  import { wouAuth } from '@worldofunreal/id-sdk';
+
+  const modal = document.getElementById('wou-auth-modal');
+  const closeBtn = document.getElementById('modal-close-btn');
+  const errorBanner = document.getElementById('modal-error');
+  const errorMsg = document.getElementById('modal-error-msg');
+  const modalTitle = document.getElementById('modal-title');
+  const modalSubtitle = document.getElementById('modal-subtitle');
+  const defaultTitle = modalTitle?.textContent ?? '';
+  const defaultSubtitle = modalSubtitle?.textContent ?? '';
+
+  // Tabs
+  const tabBtnEmail = document.getElementById('tab-btn-email');
+  const tabBtnSocial = document.getElementById('tab-btn-social');
+  const tabBtnWeb3 = document.getElementById('tab-btn-web3');
+  const tabContentEmail = document.getElementById('tab-content-email');
+  const tabContentSocial = document.getElementById('tab-content-social');
+  const tabContentWeb3 = document.getElementById('tab-content-web3');
+
+  // Forms
+  const formRequestOtp = document.getElementById('form-request-otp') as HTMLFormElement;
+  const formVerifyOtp = document.getElementById('form-verify-otp') as HTMLFormElement;
+  const inputEmail = document.getElementById('wou-input-email') as HTMLInputElement;
+  const inputNewsletter = document.getElementById('wou-input-newsletter') as HTMLInputElement;
+  const btnChangeEmail = document.getElementById('btn-change-email');
+  const btnResendOtp = document.getElementById('btn-resend-otp');
+  const otpDigits = document.querySelectorAll('.otp-digit') as NodeListOf<HTMLInputElement>;
+
+  let currentEmail = '';
+
+  function showError(msg: string) {
+    if (errorBanner && errorMsg) {
+      errorMsg.textContent = msg;
+      errorBanner.classList.remove('hidden');
+    }
+  }
+
+  function hideError() {
+    errorBanner?.classList.add('hidden');
+  }
+
+  function setActiveTab(tab: 'email' | 'social' | 'web3') {
+    hideError();
+    const activeClass = 'bg-white text-zinc-950 shadow-md';
+    const inactiveClass = 'text-zinc-400 hover:text-white';
+
+    [tabBtnEmail, tabBtnSocial, tabBtnWeb3].forEach((b) => {
+      b?.setAttribute('class', 'flex-1 py-2 text-xs font-semibold rounded-xl transition-all ' + inactiveClass);
+    });
+
+    tabContentEmail?.classList.add('hidden');
+    tabContentSocial?.classList.add('hidden');
+    tabContentWeb3?.classList.add('hidden');
+
+    if (tab === 'email') {
+      tabBtnEmail?.setAttribute('class', 'flex-1 py-2 text-xs font-semibold rounded-xl transition-all ' + activeClass);
+      tabContentEmail?.classList.remove('hidden');
+    } else if (tab === 'social') {
+      tabBtnSocial?.setAttribute('class', 'flex-1 py-2 text-xs font-semibold rounded-xl transition-all ' + activeClass);
+      tabContentSocial?.classList.remove('hidden');
+    } else if (tab === 'web3') {
+      tabBtnWeb3?.setAttribute('class', 'flex-1 py-2 text-xs font-semibold rounded-xl transition-all ' + activeClass);
+      tabContentWeb3?.classList.remove('hidden');
+    }
+  }
+
+  tabBtnEmail?.addEventListener('click', () => setActiveTab('email'));
+  tabBtnSocial?.addEventListener('click', () => setActiveTab('social'));
+  tabBtnWeb3?.addEventListener('click', () => setActiveTab('web3'));
+
+  // Open / Close events
+  window.addEventListener('wou:open-modal', () => {
+    hideError();
+    modal?.classList.remove('hidden');
+  });
+
+  window.addEventListener('wou:close-modal', () => {
+    modal?.classList.add('hidden');
+  });
+
+  closeBtn?.addEventListener('click', () => wouAuth.closeModal());
+  modal?.addEventListener('click', (e) => {
+    if (e.target === modal) wouAuth.closeModal();
+  });
+
+  // Request OTP Handler
+  formRequestOtp?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    hideError();
+    currentEmail = inputEmail.value.trim();
+    if (!currentEmail) return;
+
+    try {
+      await wouAuth.requestOtp(currentEmail, inputNewsletter.checked);
+      formRequestOtp.classList.add('hidden');
+      formVerifyOtp.classList.remove('hidden');
+      if (modalTitle) modalTitle.textContent = 'Enter Security Code';
+      if (modalSubtitle) modalSubtitle.textContent = `Verification code sent to ${currentEmail}`;
+      otpDigits[0]?.focus();
+    } catch (err: any) {
+      showError(err.message || 'Failed to send OTP code.');
+    }
+  });
+
+  // OTP Digits Handling
+  otpDigits.forEach((digit, idx) => {
+    digit.addEventListener('input', (e) => {
+      const input = e.target as HTMLInputElement;
+      const val = input.value.slice(-1);
+      input.value = val;
+
+      if (val && idx < 5) {
+        otpDigits[idx + 1].focus();
+      }
+
+      // Check if all 6 filled
+      const fullCode = Array.from(otpDigits).map(d => d.value).join('');
+      if (fullCode.length === 6) {
+        verifyCode(fullCode);
+      }
+    });
+
+    digit.addEventListener('paste', (e: ClipboardEvent) => {
+      e.preventDefault();
+      const text = (e.clipboardData?.getData('text') || '').replace(/\D/g, '').slice(0, 6);
+      if (!text) return;
+      if (text.length === 6) {
+        text.split('').forEach((ch, i) => (otpDigits[i].value = ch));
+        otpDigits[5].focus();
+      } else {
+        for (let i = 0; i < text.length && idx + i < 6; i++) {
+          otpDigits[idx + i].value = text[i];
+        }
+        otpDigits[Math.min(idx + text.length, 5)].focus();
+      }
+      const full = Array.from(otpDigits).map(d => d.value).join('');
+      if (full.length === 6) verifyCode(full);
+    });
+
+    digit.addEventListener('keydown', (e) => {
+      if (e.key === 'Backspace' && !digit.value && idx > 0) {
+        otpDigits[idx - 1].focus();
+      }
+    });
+  });
+
+  async function verifyCode(code: string) {
+    hideError();
+    try {
+      await wouAuth.verifyOtp(currentEmail, code);
+      modal?.classList.add('hidden');
+    } catch (err: any) {
+      showError(err.message || 'Invalid or expired code.');
+    }
+  }
+
+  formVerifyOtp?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const fullCode = Array.from(otpDigits).map(d => d.value).join('');
+    if (fullCode.length === 6) {
+      verifyCode(fullCode);
+    }
+  });
+
+  btnChangeEmail?.addEventListener('click', () => {
+    formVerifyOtp.classList.add('hidden');
+    formRequestOtp.classList.remove('hidden');
+    if (modalTitle) modalTitle.textContent = defaultTitle;
+    if (modalSubtitle) modalSubtitle.textContent = defaultSubtitle;
+    otpDigits.forEach(d => (d.value = ''));
+  });
+
+  btnResendOtp?.addEventListener('click', async () => {
+    try {
+      await wouAuth.requestOtp(currentEmail, inputNewsletter.checked);
+      showError('New verification code sent!');
+    } catch (err: any) {
+      showError(err.message || 'Failed to resend code.');
+    }
+  });
+
+  // Social Buttons
+  document.querySelectorAll('.social-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const provider = btn.getAttribute('data-provider') as any;
+      if (provider) {
+        wouAuth.loginWithOAuth(provider);
+      }
+    });
+  });
+
+  // Web3 Buttons
+  document.getElementById('web3-solana')?.addEventListener('click', async () => {
+    hideError();
+    try {
+      await wouAuth.loginWithSolana();
+      modal?.classList.add('hidden');
+    } catch (err: any) {
+      showError(err.message || 'Solana authentication failed.');
+    }
+  });
+
+  document.getElementById('web3-evm')?.addEventListener('click', async () => {
+    hideError();
+    try {
+      await wouAuth.loginWithEthereum();
+      modal?.classList.add('hidden');
+    } catch (err: any) {
+      showError(err.message || 'Ethereum authentication failed.');
+    }
+  });
+
+  document.getElementById('web3-icp')?.addEventListener('click', async () => {
+    hideError();
+    try {
+      await wouAuth.loginWithInternetIdentity();
+      modal?.classList.add('hidden');
+    } catch (err: any) {
+      showError(err.message || 'Internet Identity authentication failed.');
+    }
+  });
+
+  // QR sign-in (same everywhere)
+  let qrState = null;
+  let qrPoll = null;
+  const qrBox = document.getElementById('qr-box');
+  const qrIdle = document.getElementById('qr-idle');
+  const qrView = document.getElementById('qr-view');
+  const qrLink = document.getElementById('qr-link');
+  const qrTimer = document.getElementById('qr-timer');
+  function qrStop() { if (qrPoll) clearInterval(qrPoll); qrPoll = null; }
+  document.getElementById('qr-start')?.addEventListener('click', async () => {
+    hideError();
+    try {
+      const u = (document.getElementById('qr-user') as HTMLInputElement)?.value.trim() || undefined;
+      const q = await wouAuth.startQr({ username: u });
+      qrState = q;
+      (qrLink as HTMLInputElement).value = q.approve_url;
+      qrIdle?.classList.add('hidden'); qrView?.classList.remove('hidden');
+      let left = q.expires_in_seconds;
+      const tick = () => { if (qrTimer) qrTimer.textContent = Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0') + (q.notified?.length ? ' · push: ' + q.notified.join(', ') : ''); };
+      tick();
+      qrStop();
+      qrPoll = setInterval(async () => {
+        left -= 2;
+        try {
+          const s = await wouAuth.qrStatus(q.id, q.secret);
+          if (s.status === 'approved' && s.session_token && s.account) {
+            qrStop();
+            wouAuth.setSession(s.session_token, s.account);
+            window.location.reload();
+            return;
+          }
+          if (s.status === 'expired') { qrStop(); qrState = null; qrIdle?.classList.remove('hidden'); qrView?.classList.add('hidden'); showError('Code expired.'); return; }
+        } catch {}
+        tick();
+      }, 2000);
+    } catch (err: any) { showError(err.message || 'QR failed.'); }
+  });
+  document.getElementById('qr-copy')?.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText((qrLink as HTMLInputElement).value); } catch {}
+  });
+  document.getElementById('qr-cancel')?.addEventListener('click', async () => {
+    if (qrState) { try { await wouAuth.qrCancel(qrState.id, qrState.secret); } catch {} }
+    qrStop(); qrState = null; qrIdle?.classList.remove('hidden'); qrView?.classList.add('hidden');
+  });
+</script>

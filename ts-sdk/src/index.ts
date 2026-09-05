@@ -5,6 +5,9 @@
 
 export const ID_SERVER_URL = 'https://id.worldofunreal.com';
 export const AUTH_HUB_CALLBACK_URL = 'https://worldofunreal.com/auth/callback';
+// Official product brand. Wordmark is `WouID`; logo ships at `assets/wouid.svg`.
+export const WOUID_BRAND_NAME = 'WouID';
+export const WOUID_LOGO_URL = 'https://worldofunreal.com/wouid.svg';
 // Single canonical legal home for the org (Hyper points here; games keep their own pages too).
 export const PRIVACY_URL = 'https://worldofunreal.com/privacy';
 export const TERMS_URL = 'https://worldofunreal.com/terms';
@@ -138,6 +141,11 @@ export class WouAuthClient {
     if (typeof window !== 'undefined') {
       this.initSession();
     }
+  }
+
+  /** Override the context sent with OTP/QR/OAuth calls (one line per site entry). */
+  public setDefaultContext(ctx: GameContext): void {
+    this.defaultContext = ctx;
   }
 
   public initSession(): PlayerAccount | null {
