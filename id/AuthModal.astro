@@ -64,28 +64,6 @@ const {
       </button>
     </div>
 
-        <!-- QR SIGN-IN (same flow everywhere: scan, approve on phone, this device enters) -->
-    <div id="qr-box" class="mb-5 p-3 rounded-xl border border-white/10 bg-white/[0.03] flex items-center gap-3">
-      <div id="qr-idle" class="flex-1 flex items-center gap-2">
-        <div class="flex-1">
-          <div class="text-xs font-bold text-white">Scan to sign in</div>
-          <input id="qr-user" placeholder="@username for push (optional)" class="mt-1 w-full px-2 py-1 rounded-lg bg-black/40 border border-white/10 text-[11px] font-mono text-white placeholder-zinc-600 focus:outline-none" />
-        </div>
-        <button id="qr-start" type="button" class="px-3 py-1.5 rounded-lg bg-white text-zinc-950 text-xs font-bold hover:bg-zinc-200 transition-all cursor-pointer">Show link</button>
-      </div>
-      <div id="qr-view" class="hidden flex-1">
-        <div class="text-xs font-bold text-white">Open on your phone</div>
-        <div class="flex items-center gap-2 mt-1">
-          <input id="qr-link" readonly class="flex-1 px-2 py-1 rounded-lg bg-black/40 border border-white/10 text-[11px] font-mono text-zinc-300 focus:outline-none" />
-          <button id="qr-copy" type="button" class="px-3 py-1 rounded-lg bg-zinc-900 border border-white/15 text-white text-[11px] font-bold hover:bg-zinc-800 transition-all cursor-pointer">Copy</button>
-        </div>
-        <div class="flex items-center gap-2 mt-1.5">
-          <span id="qr-timer" class="text-[11px] font-mono text-zinc-500"></span>
-          <button id="qr-cancel" type="button" class="text-[11px] text-zinc-400 hover:text-white ml-auto">Cancel</button>
-        </div>
-      </div>
-    </div>
-
     <!-- TAB 1: EMAIL OTP -->
     <div id="tab-content-email">
       <!-- Step 1: Input Email Form -->
@@ -101,13 +79,6 @@ const {
             placeholder="name@example.com"
             class="w-full px-4 py-3 rounded-xl bg-zinc-900/90 border border-white/15 text-white placeholder-zinc-500 text-sm focus:outline-none focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400 transition-all"
           />
-        </div>
-
-        <div class="flex items-center gap-2 pt-1">
-          <input id="wou-input-newsletter" type="checkbox" checked class="w-4 h-4 rounded bg-zinc-900 border-white/20 text-cyan-500 focus:ring-cyan-400 cursor-pointer" />
-          <label for="wou-input-newsletter" class="text-xs text-zinc-400 cursor-pointer select-none">
-            Subscribe to monthly studio updates & patch notes
-          </label>
         </div>
 
         <button
@@ -242,7 +213,6 @@ const {
   const formRequestOtp = document.getElementById('form-request-otp') as HTMLFormElement;
   const formVerifyOtp = document.getElementById('form-verify-otp') as HTMLFormElement;
   const inputEmail = document.getElementById('wou-input-email') as HTMLInputElement;
-  const inputNewsletter = document.getElementById('wou-input-newsletter') as HTMLInputElement;
   const btnChangeEmail = document.getElementById('btn-change-email');
   const btnResendOtp = document.getElementById('btn-resend-otp');
   const otpDigits = document.querySelectorAll('.otp-digit') as NodeListOf<HTMLInputElement>;
@@ -312,7 +282,7 @@ const {
     if (!currentEmail) return;
 
     try {
-      await wouAuth.requestOtp(currentEmail, inputNewsletter.checked);
+      await wouAuth.requestOtp(currentEmail, false);
       formRequestOtp.classList.add('hidden');
       formVerifyOtp.classList.remove('hidden');
       if (modalTitle) modalTitle.textContent = 'Enter Security Code';
@@ -393,7 +363,7 @@ const {
 
   btnResendOtp?.addEventListener('click', async () => {
     try {
-      await wouAuth.requestOtp(currentEmail, inputNewsletter.checked);
+      await wouAuth.requestOtp(currentEmail, false);
       showError('New verification code sent!');
     } catch (err: any) {
       showError(err.message || 'Failed to resend code.');
@@ -441,48 +411,4 @@ const {
     }
   });
 
-  // QR sign-in (same everywhere)
-  let qrState = null;
-  let qrPoll = null;
-  const qrBox = document.getElementById('qr-box');
-  const qrIdle = document.getElementById('qr-idle');
-  const qrView = document.getElementById('qr-view');
-  const qrLink = document.getElementById('qr-link');
-  const qrTimer = document.getElementById('qr-timer');
-  function qrStop() { if (qrPoll) clearInterval(qrPoll); qrPoll = null; }
-  document.getElementById('qr-start')?.addEventListener('click', async () => {
-    hideError();
-    try {
-      const u = (document.getElementById('qr-user') as HTMLInputElement)?.value.trim() || undefined;
-      const q = await wouAuth.startQr({ username: u });
-      qrState = q;
-      (qrLink as HTMLInputElement).value = q.approve_url;
-      qrIdle?.classList.add('hidden'); qrView?.classList.remove('hidden');
-      let left = q.expires_in_seconds;
-      const tick = () => { if (qrTimer) qrTimer.textContent = Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0') + (q.notified?.length ? ' · push: ' + q.notified.join(', ') : ''); };
-      tick();
-      qrStop();
-      qrPoll = setInterval(async () => {
-        left -= 2;
-        try {
-          const s = await wouAuth.qrStatus(q.id, q.secret);
-          if (s.status === 'approved' && s.session_token && s.account) {
-            qrStop();
-            wouAuth.setSession(s.session_token, s.account);
-            window.location.reload();
-            return;
-          }
-          if (s.status === 'expired') { qrStop(); qrState = null; qrIdle?.classList.remove('hidden'); qrView?.classList.add('hidden'); showError('Code expired.'); return; }
-        } catch {}
-        tick();
-      }, 2000);
-    } catch (err: any) { showError(err.message || 'QR failed.'); }
-  });
-  document.getElementById('qr-copy')?.addEventListener('click', async () => {
-    try { await navigator.clipboard.writeText((qrLink as HTMLInputElement).value); } catch {}
-  });
-  document.getElementById('qr-cancel')?.addEventListener('click', async () => {
-    if (qrState) { try { await wouAuth.qrCancel(qrState.id, qrState.secret); } catch {} }
-    qrStop(); qrState = null; qrIdle?.classList.remove('hidden'); qrView?.classList.add('hidden');
-  });
 </script>

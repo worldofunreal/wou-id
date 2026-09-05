@@ -399,11 +399,11 @@ export class WouAuthClient {
   // ==========================================
 
   public async sendEmailOtp(email: string): Promise<{ status: string; message: string }> {
-    return this.requestOtp(email, true);
+    return this.requestOtp(email, false);
   }
 
   /** Canonical OTP request used by every modal (web + Hyper). */
-  public async requestOtp(email: string, newsletterOptIn = true, context?: GameContext): Promise<{ status: string; message: string }> {
+  public async requestOtp(email: string, newsletterOptIn = false, context?: GameContext): Promise<{ status: string; message: string }> {
     const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/otp/request`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
