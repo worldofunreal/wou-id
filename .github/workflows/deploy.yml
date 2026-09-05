@@ -22,14 +22,14 @@ jobs:
         with:
           node-version: '22'
           cache: 'npm'
-          cache-dependency-path: 'ts-sdk/package-lock.json'
+          cache-dependency-path: 'id/package-lock.json'
 
       - name: Install SDK Dependencies
-        working-directory: ts-sdk
+        working-directory: id
         run: npm install
 
       - name: Compile SDK (tsc)
-        working-directory: ts-sdk
+        working-directory: id
         run: npm run build
 
   deploy-server:
@@ -62,7 +62,7 @@ jobs:
             -e "ssh -o StrictHostKeyChecking=no" \
             --exclude "target" \
             --exclude ".git" \
-            --exclude "ts-sdk/node_modules" \
+            --exclude "id/node_modules" \
             ./ ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:~/.wou-id-build/
 
       - name: Compile and Install Binary on FreeBSD Host
