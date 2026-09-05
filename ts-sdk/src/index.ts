@@ -5,6 +5,19 @@
 
 export const ID_SERVER_URL = 'https://id.worldofunreal.com';
 export const AUTH_HUB_CALLBACK_URL = 'https://worldofunreal.com/auth/callback';
+// Single canonical legal home for the org (Hyper points here; games keep their own pages too).
+export const PRIVACY_URL = 'https://worldofunreal.com/privacy';
+export const TERMS_URL = 'https://worldofunreal.com/terms';
+// Single sender for the whole org.
+export const SENDER_EMAIL = 'no-reply@worldofunreal.com';
+
+/** 13+ check. DOB is validated client-side only — never stored or sent. */
+export function is13Plus(year: number, month: number, day: number, now = new Date()): boolean {
+  const dob = new Date(year, month - 1, day);
+  if (Number.isNaN(dob.getTime())) return false;
+  const cut = new Date(now.getFullYear() - 13, now.getMonth(), now.getDate());
+  return dob <= cut;
+}
 
 export type GameContext =
   | 'world_of_unreal'
@@ -212,6 +225,120 @@ export class WouAuthClient {
     return !!this.sessionToken && !!this.user;
   }
 
+  public async getMe(): Promise<PlayerAccount | null> {
+    if (!this.sessionToken) return null;
+    try {
+      const res = await fetch(`${ID_SERVER_URL}/api/v1/auth/me`, {
+        headers: { Authorization: `Bearer ${this.sessionToken}` },
+      });
+      if (!res.ok) return null;
+      const account = (await res.json()) as PlayerAccount;
+      this.user = account;
+      return account;
+    } catch {
+      return null;
+    }
+  }
+
+  public async refreshSession(): Promise<AuthResponse | null> {
+    if (!this.sessionToken) return null;
+    try {
+      const res = await fetch(`${ID_SERVER_URL}/api/v1/auth/refresh`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${this.sessionToken}` },
+      });
+      if (!res.ok) return null;
+      const data = (await res.json()) as AuthResponse;
+      this.setSession(data.session_token, data.account);
+      return data;
+    } catch {
+      return null;
+    }
+  }
+
+  // ==========================================
+  // QR LOGIN (desktop shows code, authed phone approves)
+  // ==========================================
+
+  public async startQr(context?: GameContext | { context?: GameContext; username?: string }): Promise<{ id: string; approve_url: string; secret: string; expires_in_seconds: number; notified?: string[] }> {
+    const opts = typeof context === 'object' ? context : { context };
+    const res = await fetch(`${ID_SERVER_URL}/api/v1/auth/qr/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ context: opts.context || this.defaultContext, username: opts.username || '' }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to start QR login.');
+    return data;
+  }
+
+  public async qrStatus(id: string, secret: string): Promise<{ status: string; account?: PlayerAccount; session_token?: string }> {
+    const res = await fetch(`${ID_SERVER_URL}/api/v1/auth/qr/${encodeURIComponent(id)}/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ secret }),
+    });
+    const data = await res.json();
+    if (res.status === 410) return { status: 'expired' };
+    if (!res.ok) throw new Error(data.error || 'QR status check failed.');
+    return data;
+  }
+
+  public async qrCancel(id: string, secret: string): Promise<void> {
+    await fetch(`${ID_SERVER_URL}/api/v1/auth/qr/${encodeURIComponent(id)}/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ secret }),
+    });
+  }
+
+  public async botLinkStart(): Promise<{ code: string; expires_in_seconds: number }> {
+    if (!this.sessionToken) throw new Error('Sign in first.');
+    const res = await fetch(`${ID_SERVER_URL}/api/v1/bots/link/start`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${this.sessionToken}` },
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to mint link code.');
+    return data;
+  }
+
+  public async botLinked(): Promise<{ telegram: boolean; discord: boolean; telegram_ids: string[]; discord_ids: string[] }> {
+    const empty = { telegram: false, discord: false, telegram_ids: [], discord_ids: [] };
+    if (!this.sessionToken) return empty;
+    try {
+      const res = await fetch(`${ID_SERVER_URL}/api/v1/bots/linked`, {
+        headers: { Authorization: `Bearer ${this.sessionToken}` },
+      });
+      if (!res.ok) return empty;
+      return await res.json();
+    } catch {
+      return empty;
+    }
+  }
+
+  public async botUnlink(ns: 'tg' | 'dc', external_id: string): Promise<void> {
+    if (!this.sessionToken) throw new Error('Sign in first.');
+    const res = await fetch(`${ID_SERVER_URL}/api/v1/bots/link/${ns}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.sessionToken}` },
+      body: JSON.stringify({ external_id }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((data as any).error || 'Unlink failed.');
+  }
+
+  public async approveQr(id: string, secret: string): Promise<void> {
+    if (!this.sessionToken) throw new Error('Sign in on this device first.');
+    const res = await fetch(`${ID_SERVER_URL}/api/v1/auth/qr/${encodeURIComponent(id)}/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.sessionToken}` },
+      body: JSON.stringify({ secret }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((data as any).error || 'QR approval failed.');
+  }
+
   // ==========================================
   // MODAL CONTROLS
   // ==========================================
@@ -257,10 +384,20 @@ export class WouAuthClient {
   // ==========================================
 
   public async sendEmailOtp(email: string): Promise<{ status: string; message: string }> {
-    const res = await fetch(`${ID_SERVER_URL}/api/v1/auth/otp/send`, {
+    return this.requestOtp(email, true);
+  }
+
+  /** Canonical OTP request used by every modal (web + Hyper). */
+  public async requestOtp(email: string, newsletterOptIn = true, context?: GameContext): Promise<{ status: string; message: string }> {
+    const res = await fetch(`${ID_SERVER_URL}/api/v1/auth/otp/request`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email }),
+      body: JSON.stringify({
+        email,
+        account_id: this.user?.id || null,
+        context: context || this.defaultContext,
+        newsletter_opt_in: newsletterOptIn,
+      }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to dispatch verification code.');
@@ -268,6 +405,11 @@ export class WouAuthClient {
   }
 
   public async verifyEmailOtp(email: string, code: string, context?: GameContext): Promise<AuthResponse> {
+    return this.verifyOtp(email, code, context);
+  }
+
+  /** Canonical OTP verify used by every modal (web + Hyper). Third arg may be a legacy newsletter boolean (ignored: opt-in is captured at request time). */
+  public async verifyOtp(email: string, code: string, context?: GameContext | boolean): Promise<AuthResponse> {
     const res = await fetch(`${ID_SERVER_URL}/api/v1/auth/otp/verify`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -275,7 +417,7 @@ export class WouAuthClient {
         email,
         code,
         account_id: this.user?.id || null,
-        context: context || this.defaultContext,
+        context: typeof context === 'string' ? context : this.defaultContext,
       }),
     });
     const data = await res.json();

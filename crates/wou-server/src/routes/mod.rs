@@ -1,4 +1,5 @@
 pub mod anonymous;
+pub mod bots;
 pub mod clan;
 pub mod inventory;
 pub mod link;
@@ -6,6 +7,8 @@ pub mod newsletter;
 pub mod oauth;
 pub mod otp;
 pub mod profile;
+pub mod qr;
+pub mod session;
 pub mod social;
 pub mod upload;
 pub mod web3;

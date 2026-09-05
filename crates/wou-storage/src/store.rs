@@ -132,6 +132,163 @@ impl WouStorage {
         Ok(pending)
     }
 
+    // =========================================================================
+    // Bot links + link codes (Valkey; links persistent, codes 10-min TTL)
+    // =========================================================================
+
+    /// One-time link code shown by a logged-in client: `wou_link:{code}` → account_id.
+    pub async fn save_link_code(&self, code: &str, account_id: &str) -> Result<(), WouError> {
+        let mut conn = self.get_redis().await?;
+        let _: () = conn
+            .set_ex(format!("wou_link:{code}"), account_id, 600)
+            .await
+            .map_err(|e| WouError::DatabaseError(format!("Redis SETEX failed: {e}")))?;
+        Ok(())
+    }
+
+    /// Atomic GET+DEL: one-time codes can never double-spend, even concurrently.
+    pub async fn consume_link_code(&self, code: &str) -> Result<Option<String>, WouError> {
+        let mut conn = self.get_redis().await?;
+        let key = format!("wou_link:{}", code.to_uppercase());
+        let script = redis::Script::new(
+            "local v = redis.call('GET', KEYS[1]); if v then redis.call('DEL', KEYS[1]); end; return v",
+        );
+        script
+            .key(&key)
+            .invoke_async(&mut conn)
+            .await
+            .map_err(|e| WouError::DatabaseError(format!("Redis consume failed: {e}")))
+    }
+
+    /// Best-effort fixed-window gate: true when this is the first hit in `ttl_seconds`.
+    pub async fn check_rate(&self, key: &str, ttl_seconds: u64) -> Result<bool, WouError> {
+        let mut conn = self.get_redis().await?;
+        let fresh: bool = conn
+            .set_nx(key, "1")
+            .await
+            .map_err(|e| WouError::DatabaseError(format!("Redis SETNX failed: {e}")))?;
+        if fresh {
+            let _: () = conn.expire(key, ttl_seconds as i64).await.unwrap_or(());
+        }
+        Ok(fresh)
+    }
+
+    /// Short mutex around QR approval so web+bot approvers serialize (5s).
+    pub async fn acquire_qr_lock(&self, id: &str) -> Result<bool, WouError> {
+        let mut conn = self.get_redis().await?;
+        let fresh: bool = conn
+            .set_nx(format!("wou_qr_lock:{id}"), "1")
+            .await
+            .map_err(|e| WouError::DatabaseError(format!("Redis SETNX failed: {e}")))?;
+        if fresh {
+            let _: () = conn.expire(format!("wou_qr_lock:{id}"), 5).await.unwrap_or(());
+        }
+        Ok(fresh)
+    }
+
+    pub async fn release_qr_lock(&self, id: &str) -> Result<(), WouError> {
+        let mut conn = self.get_redis().await?;
+        let _: () = conn.del(format!("wou_qr_lock:{id}")).await.unwrap_or(());
+        Ok(())
+    }
+
+    /// Delete one identity-index row (unlink must not leave ghost login mappings).
+    pub async fn remove_identity_index(&self, provider: &str, external_id: &str) -> Result<(), WouError> {
+        let write_txn = self
+            .redb
+            .begin_write()
+            .map_err(|e| WouError::DatabaseError(format!("Redb write txn failed: {e}")))?;
+        {
+            let mut index_table = write_txn
+                .open_table(IDENTITY_INDEX_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open index table failed: {e}")))?;
+            let index_key = format!("{}:{}", provider, external_id.to_lowercase());
+            index_table
+                .remove(index_key.as_str())
+                .map_err(|e| WouError::DatabaseError(format!("Remove identity index failed: {e}")))?;
+        }
+        write_txn
+            .commit()
+            .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
+        Ok(())
+    }
+
+    /// chat/user id → account id, e.g. `wou_tg_link:123` or `wou_dc_link:456`.
+    pub async fn save_bot_link(&self, ns: &str, external_id: &str, account_id: &str) -> Result<(), WouError> {
+        let mut conn = self.get_redis().await?;
+        let _: () = conn
+            .set(format!("wou_{ns}_link:{external_id}"), account_id)
+            .await
+            .map_err(|e| WouError::DatabaseError(format!("Redis SET failed: {e}")))?;
+        let _: () = conn
+            .sadd(format!("wou_{ns}_accounts:{account_id}"), external_id)
+            .await
+            .map_err(|e| WouError::DatabaseError(format!("Redis SADD failed: {e}")))?;
+        Ok(())
+    }
+
+    pub async fn get_bot_link(&self, ns: &str, external_id: &str) -> Result<Option<String>, WouError> {
+        let mut conn = self.get_redis().await?;
+        conn.get(format!("wou_{ns}_link:{external_id}"))
+            .await
+            .map_err(|e| WouError::DatabaseError(format!("Redis GET failed: {e}")))
+    }
+
+    pub async fn get_linked_chats(&self, ns: &str, account_id: &str) -> Result<Vec<String>, WouError> {
+        let mut conn = self.get_redis().await?;
+        conn.smembers(format!("wou_{ns}_accounts:{account_id}"))
+            .await
+            .map_err(|e| WouError::DatabaseError(format!("Redis SMEMBERS failed: {e}")))
+    }
+
+    pub async fn remove_bot_link(&self, ns: &str, external_id: &str, account_id: &str) -> Result<(), WouError> {
+        let mut conn = self.get_redis().await?;
+        let _: () = conn.del(format!("wou_{ns}_link:{external_id}")).await.unwrap_or(());
+        let _: () = conn
+            .srem(format!("wou_{ns}_accounts:{account_id}"), external_id)
+            .await
+            .unwrap_or(());
+        Ok(())
+    }
+
+    // =========================================================================
+    // QR login challenges (Valkey-only, 5-minute TTL, single-use)
+    // =========================================================================
+
+    pub async fn save_qr_challenge(&self, ch: &wou_core::QrChallenge, ttl_seconds: u64) -> Result<(), WouError> {
+        let mut conn = self.get_redis().await?;
+        let key = format!("wou_qr:{}", ch.id);
+        let json = serde_json::to_string(ch)
+            .map_err(|e| WouError::Internal(format!("QR serialization error: {e}")))?;
+        let _: () = conn
+            .set_ex(&key, json, ttl_seconds)
+            .await
+            .map_err(|e| WouError::DatabaseError(format!("Redis SETEX failed: {e}")))?;
+        Ok(())
+    }
+
+    pub async fn get_qr_challenge(&self, id: &str) -> Result<Option<wou_core::QrChallenge>, WouError> {
+        let mut conn = self.get_redis().await?;
+        let key = format!("wou_qr:{id}");
+        let json: Option<String> = conn
+            .get(&key)
+            .await
+            .map_err(|e| WouError::DatabaseError(format!("Redis GET failed: {e}")))?;
+        match json {
+            None => Ok(None),
+            Some(s) => serde_json::from_str(&s)
+                .map(Some)
+                .map_err(|e| WouError::Internal(format!("QR parse error: {e}"))),
+        }
+    }
+
+    pub async fn delete_qr_challenge(&self, id: &str) -> Result<(), WouError> {
+        let mut conn = self.get_redis().await?;
+        let key = format!("wou_qr:{id}");
+        let _: () = conn.del(&key).await.unwrap_or(());
+        Ok(())
+    }
+
     pub async fn save_cache_string(&self, key: &str, val: &str, ttl_seconds: u64) -> Result<(), WouError> {
         let mut conn = self.get_redis().await?;
         let _: () = conn

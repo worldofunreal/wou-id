@@ -44,14 +44,10 @@ impl GameContext {
         }
     }
 
+    /// Single sender for the whole org: one SDK, one mailbox.
+    /// Per-game branding lives in the From name and template theme, not the address.
     pub fn default_sender(&self) -> &'static str {
-        match self {
-            Self::ShadowsOfWar => "no-reply@shadowsofwar.io",
-            Self::Cosmicrafts => "no-reply@cosmicrafts.com",
-            Self::Nftropoly => "no-reply@nftropoly.com",
-            Self::Darkrift => "no-reply@darkrift.ai",
-            Self::WorldOfUnreal => "no-reply@worldofunreal.com",
-        }
+        "no-reply@worldofunreal.com"
     }
 }
 
@@ -200,7 +196,7 @@ pub struct UserProfile {
     pub custom_attributes: HashMap<String, serde_json::Value>,
 }
 
-/// Master Player Account in World of Unreal Identity ("Battle.net meets Web3").
+/// Master Player Account in World of Unreal Identity.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct PlayerAccount {
     /// Canonical unique UUID.
@@ -397,6 +393,19 @@ pub struct PendingOtp {
     pub context: GameContext,
     pub newsletter_opt_in: bool,
     pub requested_at: u64,
+}
+
+/// QR login challenge (Valkey-only, 5-minute TTL, single-use).
+/// Only the secret hash is stored. The issued session token lives in the
+/// challenge only during the 60s delivery window, then the key is consumed.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct QrChallenge {
+    pub id: String,
+    pub secret_hash: String,
+    pub context: GameContext,
+    pub created_at: u64,
+    pub approved_account_id: Option<String>,
+    pub session_token: Option<String>,
 }
 
 /// Authoritative Clan entity.

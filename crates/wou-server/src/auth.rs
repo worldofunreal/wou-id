@@ -94,6 +94,7 @@ mod tests {
             mailer,
             jwt: jwt_arc.clone(),
             oauth: Arc::new(OAuthManager::new()),
+            bots: Arc::new(crate::bots::BotClients::new()),
             otp_expiry_seconds: 600,
         };
 

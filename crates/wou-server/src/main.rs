@@ -1,4 +1,5 @@
 mod auth;
+mod bots;
 mod routes;
 mod state;
 
@@ -90,12 +91,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mailer = StalwartMailer::new(mailer_config)?;
     let jwt = Arc::new(JwtManager::new(&jwt_secret));
     let oauth = Arc::new(OAuthManager::new());
+    let bots = Arc::new(bots::BotClients::new());
+    // Never block boot on Discord: register in the background, best-effort.
+    tokio::spawn({
+        let bots = bots.clone();
+        async move { bots.discord_register_commands().await }
+    });
 
     let state = AppState {
         storage,
         mailer,
         jwt,
         oauth,
+        bots,
         otp_expiry_seconds,
     };
 
@@ -108,12 +116,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         // Health Check
         .route("/health", get(|| async { "WOU-ID Online 200 OK" }))
-        // Anonymous-First Auth
+        // Anonymous-First Auth (games use it; Hyper login-wall does not)
         .route("/api/v1/auth/anonymous", post(routes::anonymous::handle_anonymous))
+        // Session (Hyper boot validation + remember-me)
+        .route("/api/v1/auth/me", get(routes::session::handle_me))
+        .route("/api/v1/auth/refresh", post(routes::session::handle_refresh))
+        .route("/api/v1/auth/logout", post(routes::session::handle_logout))
+        // Bot links + webhooks (push approval)
+        .route("/api/v1/bots/link/start", post(routes::bots::handle_link_start))
+        .route("/api/v1/bots/linked", get(routes::bots::handle_linked))
+        .route("/api/v1/bots/link/:ns", post(routes::bots::handle_unlink))
+        .route("/api/v1/bots/telegram", post(routes::bots::handle_telegram_webhook))
+        .route("/api/v1/bots/discord", post(routes::bots::handle_discord_interactions))
+        // QR login (desktop shows code, authed phone approves)
+        .route("/api/v1/auth/qr/start", post(routes::qr::handle_qr_start))
+        .route("/api/v1/auth/qr/:id/status", post(routes::qr::handle_qr_status))
+        .route("/api/v1/auth/qr/:id/approve", post(routes::qr::handle_qr_approve))
+        .route("/api/v1/auth/qr/:id/cancel", post(routes::qr::handle_qr_cancel))
         // Stalwart OTP Registration & Verification
         .route("/api/v1/auth/otp/request", post(routes::otp::handle_request_otp))
+        .route("/api/v1/auth/otp/send", post(routes::otp::handle_request_otp))
         .route("/api/v1/auth/otp/verify", post(routes::otp::handle_verify_otp))
-        // Social Media OAuth2 Auth (Discord, Google, Twitter, Meta)
+        // OAuth2 Auth
         .route("/api/v1/auth/oauth/login/:provider", get(routes::oauth::handle_oauth_login))
         .route("/api/v1/auth/oauth/callback/:provider", post(routes::oauth::handle_oauth_callback))
         // Web3 Direct Authentication (Solana & EVM)
@@ -135,7 +159,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/clans/:tag", get(routes::clan::handle_get_clan))
         .route("/api/v1/clans/:tag/join", post(routes::clan::handle_join_clan))
         .route("/api/v1/clans/:tag/leave", post(routes::clan::handle_leave_clan))
-        // Social Graph & Battle.net Cross-Activity Stream
+        // Social Graph & Cross-Activity Stream
         .route("/api/v1/social/follow/:target_id", post(routes::social::handle_follow_user))
         .route("/api/v1/social/unfollow/:target_id", post(routes::social::handle_unfollow_user))
         .route("/api/v1/social/graph/:account_id", get(routes::social::handle_get_social_graph))
