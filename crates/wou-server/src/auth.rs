@@ -82,10 +82,15 @@ mod tests {
             Ok(s) => s,
             Err(_) => return, // Skip if redis not running locally
         };
+        let mut domain_passwords = std::collections::HashMap::new();
+        domain_passwords.insert(
+            "no-reply@worldofunreal.com".to_string(),
+            "test-only-dummy-vector-not-a-real-secret".to_string(),
+        );
         let mailer = StalwartMailer::new(StalwartMailerConfig {
             smtp_host: "127.0.0.1".into(),
             smtp_port: 587,
-            domain_passwords: std::collections::HashMap::new(),
+            domain_passwords,
         })
         .unwrap();
 
