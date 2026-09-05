@@ -44,9 +44,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let redis_url = std::env::var("WOU_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/0".into());
     let redb_path = std::env::var("WOU_REDB_PATH").unwrap_or_else(|_| "/tmp/wou_accounts.redb".into());
 
-    let jwt_secret = std::env::var("WOU_JWT_SECRET").unwrap_or_else(|_| {
-        "wou_id_default_development_secret_key_change_in_production_environment_12345678".into()
-    });
+    // Required secrets: no fallbacks. Missing env = refuse to boot (open-source safe).
+    let jwt_secret =
+        std::env::var("WOU_JWT_SECRET").expect("FATAL: WOU_JWT_SECRET must be set in environment");
 
     let smtp_host = std::env::var("WOU_SMTP_HOST").unwrap_or_else(|_| "mail.worldofunreal.com".into());
     let smtp_port: u16 = std::env::var("WOU_SMTP_PORT")
@@ -57,23 +57,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut domain_passwords = std::collections::HashMap::new();
     domain_passwords.insert(
         "no-reply@worldofunreal.com".to_string(),
-        std::env::var("WOU_SMTP_PASS_WORLDOFUNREAL").unwrap_or_else(|_| "ni*5lC673XuaPjDmPk3QAgqd".into()),
+        std::env::var("WOU_SMTP_PASS_WORLDOFUNREAL")
+            .expect("FATAL: WOU_SMTP_PASS_WORLDOFUNREAL must be set in environment"),
     );
     domain_passwords.insert(
         "no-reply@shadowsofwar.io".to_string(),
-        std::env::var("WOU_SMTP_PASS_SHADOWSOFWAR").unwrap_or_else(|_| "Y2JLXLF+to%FSaTFTtop&EId".into()),
+        std::env::var("WOU_SMTP_PASS_SHADOWSOFWAR")
+            .expect("FATAL: WOU_SMTP_PASS_SHADOWSOFWAR must be set in environment"),
     );
     domain_passwords.insert(
         "no-reply@cosmicrafts.com".to_string(),
-        std::env::var("WOU_SMTP_PASS_COSMICRAFTS").unwrap_or_else(|_| "tPKfobbgaFiF#OYZJW1kg=Mn".into()),
+        std::env::var("WOU_SMTP_PASS_COSMICRAFTS")
+            .expect("FATAL: WOU_SMTP_PASS_COSMICRAFTS must be set in environment"),
     );
     domain_passwords.insert(
         "no-reply@darkrift.ai".to_string(),
-        std::env::var("WOU_SMTP_PASS_DARKRIFT").unwrap_or_else(|_| "lT5F!GYWUFJQxabv8dYkas$A".into()),
+        std::env::var("WOU_SMTP_PASS_DARKRIFT")
+            .expect("FATAL: WOU_SMTP_PASS_DARKRIFT must be set in environment"),
     );
     domain_passwords.insert(
         "no-reply@nftropoly.com".to_string(),
-        std::env::var("WOU_SMTP_PASS_NFTROPOLY").unwrap_or_else(|_| "qC%X4#rGWC*=c&jKyNDURB%!".into()),
+        std::env::var("WOU_SMTP_PASS_NFTROPOLY")
+            .expect("FATAL: WOU_SMTP_PASS_NFTROPOLY must be set in environment"),
     );
 
     let otp_expiry_seconds: u64 = std::env::var("WOU_OTP_EXPIRY_SECONDS")
