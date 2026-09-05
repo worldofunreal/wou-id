@@ -14,6 +14,18 @@ pub enum WouError {
     #[error("Rate limit exceeded: please wait {0} seconds before requesting a new code")]
     RateLimitExceeded(u64),
 
+    #[error("Too many codes requested: please wait {0} seconds")]
+    OtpThrottled(u64),
+
+    #[error("Abuse detected: please wait {0} seconds before trying again")]
+    OtpPenalized(u64),
+
+    #[error("This address is banned for abuse. Appeal at security@worldofunreal.com")]
+    EmailBanned,
+
+    #[error("Blocked for 24 hours due to abuse")]
+    IpBlocked,
+
     #[error("Invalid email address: {0}")]
     InvalidEmail(String),
 

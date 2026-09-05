@@ -5,7 +5,8 @@ use std::sync::Arc;
 use tracing::info;
 use wou_core::{GameContext, WouError};
 
-use crate::templates::render_otp_email;
+use crate::templates::{render_admin_alert, render_otp_email, render_welcome_email};
+use crate::templates::EmailContent;
 
 #[derive(Clone, Debug)]
 pub struct StalwartMailerConfig {
@@ -125,6 +126,59 @@ impl StalwartMailer {
             context.display_name()
         );
 
+        Ok(())
+    }
+
+    async fn dispatch(
+        &self,
+        to: &str,
+        from_name: &str,
+        from_email: &str,
+        content: EmailContent,
+    ) -> Result<(), WouError> {
+        let from_header = format!("{from_name} <{from_email}>")
+            .parse()
+            .map_err(|e| WouError::MailError(format!("Invalid From address: {e}")))?;
+        let to_header = to
+            .parse()
+            .map_err(|e| WouError::MailError(format!("Invalid To address: {e}")))?;
+        let email = Message::builder()
+            .from(from_header)
+            .to(to_header)
+            .subject(content.subject)
+            .header(lettre::message::header::ContentType::TEXT_HTML)
+            .body(content.html_body)
+            .map_err(|e| WouError::MailError(format!("Failed to build email message: {e}")))?;
+        let transport = self.transports.get(from_email).unwrap_or(&self.default_transport);
+        transport
+            .send(email)
+            .await
+            .map_err(|e| WouError::MailError(format!("SMTP delivery error: {e}")))?;
+        Ok(())
+    }
+
+    /// One-time welcome for a newly created account. Best-effort: never fails auth.
+    pub async fn send_welcome(
+        &self,
+        recipient_email: &str,
+        context: GameContext,
+        display_name: &str,
+    ) -> Result<(), WouError> {
+        let sender_email = context.default_sender();
+        let content = render_welcome_email(context, display_name);
+        self.dispatch(recipient_email, context.display_name(), sender_email, content)
+            .await?;
+        info!("Welcome dispatched to {recipient_email} ({})", context.display_name());
+        Ok(())
+    }
+
+    /// Internal security alert to the ops inbox. Best-effort: never fails auth.
+    pub async fn send_admin_alert(&self, to_admin: &str, subject: &str, body: &str) -> Result<(), WouError> {
+        let sender_email = GameContext::WorldOfUnreal.default_sender();
+        let content = render_admin_alert(subject, body);
+        self.dispatch(to_admin, "WouID Security", sender_email, content)
+            .await?;
+        info!("Admin alert dispatched: {subject}");
         Ok(())
     }
 }

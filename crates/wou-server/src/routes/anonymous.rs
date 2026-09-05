@@ -1,8 +1,9 @@
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{extract::State, http::HeaderMap, http::StatusCode, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use wou_core::{GameContext, PlayerAccount};
 
+use crate::routes::guard::client_ip;
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -23,8 +24,22 @@ pub struct AnonymousResponse {
 
 pub async fn handle_anonymous(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<AnonymousRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    // Protection mode + per-IP gate (same intake policy as OTP).
+    if state.storage.protection_mode().await {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "Service in protection mode, try again later"})),
+        ));
+    }
+    if let Err(e) = state.storage.tally_ip(&client_ip(&headers)).await {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ));
+    }
     // 1. If account_id provided, check if it already exists
     if let Some(ref acc_id) = payload.account_id {
         if let Ok(Some(existing_account)) = state.storage.get_account_by_id(acc_id).await {
