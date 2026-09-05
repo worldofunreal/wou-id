@@ -1,7 +1,7 @@
 {
-  "name": "@worldofunreal/id-sdk",
-  "version": "0.4.0",
-  "description": "WouID — World of Unreal Identity & Progressive Auth SDK",
+  "name": "@worldofunreal/id",
+  "version": "1.0.0",
+  "description": "WouID — World of Unreal identity: auth client + official sign-in modal",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -10,7 +10,9 @@
   },
   "files": [
     "dist",
-    "assets"
+    "AuthModal.astro",
+    "wouid.svg",
+    "README.md"
   ],
   "scripts": {
     "build": "tsc"
@@ -23,6 +25,7 @@
     "typescript": "^5.7.0"
   },
   "keywords": [
+    "wouid",
     "auth",
     "gaming",
     "web3",

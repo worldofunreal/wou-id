@@ -72,7 +72,7 @@ stateDiagram-v2
 | **[`wou-storage`](crates/wou-storage)** | Storage backend: Hot Valkey cache (rate limits, OTPs) + Durable Redb player table with inverted identity indexes. |
 | **[`wou-server`](crates/wou-server)** | Axum REST API server, CORS handlers, route controllers, and health endpoints. |
 | **[`wou-client`](crates/wou-client)** | Universal Rust Client SDK compiling to both native and `wasm32-unknown-unknown`. |
-| **[`@worldofunreal/id-sdk`](ts-sdk)** | Universal TypeScript & JavaScript SDK for React, Astro, Vue, and WebGL shells. |
+| **[`@worldofunreal/id`](id)** | Single TypeScript package: auth client + official sign-in modal for every frontend. |
 
 ---
 
@@ -134,7 +134,7 @@ POST /api/v1/newsletter/unsubscribe
 ## 💻 Quickstart (TypeScript / JavaScript SDK)
 
 ```typescript
-import { WouIdClient } from '@worldofunreal/id-sdk';
+import { WouIdClient } from '@worldofunreal/id';
 
 const auth = new WouIdClient({ baseUrl: 'https://id.worldofunreal.com' });
 
