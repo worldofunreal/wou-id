@@ -18,7 +18,7 @@ pub struct OtpRequestPayload {
 }
 
 fn default_opt_in() -> bool {
-    true
+    false
 }
 
 #[derive(Serialize)]
