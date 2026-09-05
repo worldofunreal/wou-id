@@ -34,5 +34,10 @@
     "worldofunreal"
   ],
   "author": "Omar Hernandez Salmeron <ohsalmeron@gmail.com>",
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/worldofunreal/wou-id",
+    "directory": "id"
+  }
 }
