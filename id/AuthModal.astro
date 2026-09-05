@@ -215,6 +215,26 @@ const {
   const inputEmail = document.getElementById('wou-input-email') as HTMLInputElement;
   const btnChangeEmail = document.getElementById('btn-change-email');
   const btnResendOtp = document.getElementById('btn-resend-otp');
+  // Resend cooldown: 60s client-side + server 429 wait, rendered on the button.
+  let resendCooldownUntil = 0;
+  let resendTick: any = null;
+  const resendLabel = btnResendOtp?.textContent ?? 'Resend Code';
+  function armResendCooldown(ms: number) {
+    resendCooldownUntil = Date.now() + ms;
+    btnResendOtp?.setAttribute('disabled', 'true');
+    if (resendTick) clearInterval(resendTick);
+    const render = () => {
+      const left = Math.max(0, Math.ceil((resendCooldownUntil - Date.now()) / 1000));
+      if (btnResendOtp) btnResendOtp.textContent = left > 0 ? `${resendLabel} (${left}s)` : resendLabel;
+      if (left <= 0) {
+        if (resendTick) clearInterval(resendTick);
+        resendTick = null;
+        btnResendOtp?.removeAttribute('disabled');
+      }
+    };
+    render();
+    resendTick = setInterval(render, 1000);
+  }
   const otpDigits = document.querySelectorAll('.otp-digit') as NodeListOf<HTMLInputElement>;
 
   let currentEmail = '';
@@ -289,7 +309,7 @@ const {
       if (modalSubtitle) modalSubtitle.textContent = `Verification code sent to ${currentEmail}`;
       otpDigits[0]?.focus();
     } catch (err: any) {
-      showError(err.message || 'Failed to send OTP code.');
+      showError(wouAuth.describeOtpError(err).message);
     }
   });
 
@@ -362,11 +382,15 @@ const {
   });
 
   btnResendOtp?.addEventListener('click', async () => {
+    if (Date.now() < resendCooldownUntil) return;
     try {
       await wouAuth.requestOtp(currentEmail, false);
       showError('New verification code sent!');
+      armResendCooldown(60000);
     } catch (err: any) {
-      showError(err.message || 'Failed to resend code.');
+      const d = wouAuth.describeOtpError(err);
+      if (d.retryAfterSeconds) armResendCooldown(d.retryAfterSeconds * 1000);
+      showError(d.message);
     }
   });
 
