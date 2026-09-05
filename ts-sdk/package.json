@@ -1,6 +1,6 @@
 {
   "name": "@worldofunreal/id-sdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Universal World of Unreal Identity & Progressive Auth SDK",
   "type": "module",
   "main": "./dist/index.js",

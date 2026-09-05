@@ -1,0 +1,20 @@
+Third-Party Notices for wou-id
+============================
+
+wou-id is an original work by World of Unreal. It is not affiliated with,
+endorsed by, or sponsored by Discord Inc., Google LLC, X Corp., Meta
+Platforms Inc., or any wallet vendor. Provider names appear only as
+user-selected sign-in options. All third-party marks belong to their owners.
+
+Rust dependencies (see Cargo.lock for versions)
+-----------------------------------------------
+axum, tokio, tower-http, serde, uuid, chrono, jsonwebtoken, argon2, rand,
+k256, sha2/sha3, hex, bs58, ed25519-dalek, reqwest, urlencoding, nanoid,
+lettre, redis, redb. Each under its own license (MIT/Apache-2.0/BSD/ISC —
+see crate sources).
+
+Infrastructure
+--------------
+Valkey/Redis (BSD-3-Clause), Redb (MIT OR Apache-2.0),
+Stalwart mail server (AGPL-3.0-or-later, used as an external SMTP service,
+not linked).
