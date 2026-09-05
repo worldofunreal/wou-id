@@ -1,10 +1,17 @@
 {
   "name": "@worldofunreal/id-sdk",
-  "version": "0.2.0",
-  "description": "Universal World of Unreal Identity & Progressive Auth SDK",
+  "version": "0.4.0",
+  "description": "WouID — World of Unreal Identity & Progressive Auth SDK",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "assets"
+  ],
   "scripts": {
     "build": "tsc"
   },

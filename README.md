@@ -1,6 +1,8 @@
 # 🛡️ World of Unreal Identity (`wou-id`)
 
-> **Universal, Anonymous-First, Progressive Authentication & Multi-Platform Identity Engine for World of Unreal Games & Ecosystem Products.**
+![WouID](./docs/assets/wouid.svg)
+
+> **WouID — Universal, Anonymous-First, Progressive Authentication & Multi-Platform Identity Engine for World of Unreal Games & Ecosystem Products.**
 
 [![Rust 1.80+](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
