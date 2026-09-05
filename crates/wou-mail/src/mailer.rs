@@ -44,13 +44,12 @@ impl StalwartMailer {
             transports.insert(sender_email.clone(), transport);
         }
 
-        // Default fallback transport (worldofunreal.com)
+        // Default fallback transport (worldofunreal.com). No hardcoded password:
+        // missing env = refuse to build (open-source safe).
         let default_user = "no-reply@worldofunreal.com";
-        let default_pass = config
-            .domain_passwords
-            .get(default_user)
-            .cloned()
-            .unwrap_or_else(|| "ni*5lC673XuaPjDmPk3QAgqd".into());
+        let default_pass = config.domain_passwords.get(default_user).cloned().expect(
+            "FATAL: WOU_SMTP_PASS_WORLDOFUNREAL must be set in environment",
+        );
 
         let default_creds = Credentials::new(default_user.to_string(), default_pass);
         let default_transport = if config.smtp_port == 465 {

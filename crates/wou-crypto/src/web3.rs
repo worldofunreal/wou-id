@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn test_derive_embedded_wallets_determinism() {
         let acc_id = "test-uuid-player-1234";
-        let secret = "wou-master-cluster-secret-key-9988";
+        let secret = "test-only-dummy-vector-not-a-real-secret";
         let w1 = derive_embedded_wallets(acc_id, secret);
         let w2 = derive_embedded_wallets(acc_id, secret);
 

@@ -1,0 +1,28 @@
+# Publish @worldofunreal/id to npm via Trusted Publisher (OIDC, no tokens).
+#
+# One-time setup (human, npm UI): package Settings -> Trusted Publisher ->
+# GitHub Actions -> org/user + repo `wou-id` + workflow `publish.yml`.
+# After that, publishing is: version bump in id/package.json, then
+#   git tag id-1.0.3 && git push origin id-1.0.3
+name: Publish @worldofunreal/id
+
+on:
+  push:
+    tags:
+      - "id-*"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: "https://registry.npmjs.org"
+      - run: npm install -g npm@latest
+      - run: cd id && npm install && npm run build && npm publish --provenance --access public
