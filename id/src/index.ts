@@ -415,8 +415,30 @@ export class WouAuthClient {
       }),
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to dispatch verification code.');
+    if (!res.ok) throw this.otpError(data);
     return data;
+  }
+
+  /** OTP errors carry server payload (retry_after_seconds) for UI cooldowns. */
+  private otpError(data: any): Error {
+    const err = new Error(data?.error || 'Failed to dispatch verification code.') as any;
+    err.data = data ?? null;
+    return err;
+  }
+
+  /** Human-friendly OTP failure: server message + optional retry wait (seconds). */
+  public describeOtpError(err: any): { message: string; retryAfterSeconds?: number } {
+    const data = err?.data ?? null;
+    const retry = Number(data?.retry_after_seconds ?? NaN);
+    const retryAfterSeconds = Number.isFinite(retry) && retry > 0 ? Math.ceil(retry) : undefined;
+    let message = String(err?.message || 'Failed to dispatch verification code.');
+    if (retryAfterSeconds !== undefined) {
+      const m = Math.floor(retryAfterSeconds / 60);
+      const s = retryAfterSeconds % 60;
+      const wait = m > 0 ? `${m}m ${s}s` : `${s}s`;
+      message = `Too many codes requested. Wait ${wait} before trying again.`;
+    }
+    return retryAfterSeconds === undefined ? { message } : { message, retryAfterSeconds };
   }
 
   public async verifyEmailOtp(email: string, code: string, context?: GameContext): Promise<AuthResponse> {

@@ -1,6 +1,6 @@
 {
   "name": "@worldofunreal/id",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "WouID — World of Unreal identity: auth client + official sign-in modal",
   "type": "module",
   "main": "./dist/index.js",
