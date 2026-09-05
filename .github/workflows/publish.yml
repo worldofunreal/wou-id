@@ -22,6 +22,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           registry-url: "https://registry.npmjs.org"
+      # npm 11.5.1+ is required for OIDC Trusted Publisher auth
+      - run: npm install -g npm@latest
       - run: cd id && npm install && npm run build && npm publish --provenance --access public
