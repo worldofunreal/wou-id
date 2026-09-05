@@ -33,7 +33,12 @@ pub async fn handle_upload_media(
         let name = field.name().unwrap_or("").to_string();
         if name == "media_type" {
             if let Ok(text) = field.text().await {
-                media_type = text.trim().to_lowercase();
+                // Closed enum: free text here becomes path traversal in the filename.
+                media_type = if text.trim().to_lowercase() == "banner" {
+                    "banner".to_string()
+                } else {
+                    "avatar".to_string()
+                };
             }
         } else if name == "file" {
             if let Some(content_type) = field.content_type() {

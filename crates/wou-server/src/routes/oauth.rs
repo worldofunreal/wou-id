@@ -10,6 +10,25 @@ use wou_core::{AuthProvider, GameContext, PlayerAccount};
 
 use crate::state::AppState;
 
+/// OAuth redirect targets are pinned: the central hub plus loopback (dev).
+/// Providers also enforce their own allowlists; this is defense in depth.
+pub const OAUTH_HUB_CALLBACK: &str = "https://worldofunreal.com/auth/callback";
+
+fn redirect_allowed(uri: &str) -> bool {
+    if uri == OAUTH_HUB_CALLBACK {
+        return true;
+    }
+    let host = uri
+        .split("://")
+        .nth(1)
+        .unwrap_or(uri)
+        .split('/')
+        .next()
+        .unwrap_or("");
+    let host = host.split(':').next().unwrap_or("");
+    host == "localhost" || host == "127.0.0.1"
+}
+
 #[derive(Deserialize)]
 pub struct OAuthLoginQuery {
     pub redirect_uri: Option<String>,
@@ -41,7 +60,13 @@ pub async fn handle_oauth_login(
     let redirect_uri = query
         .redirect_uri
         .or(query.redirect_url)
-        .unwrap_or_else(|| "https://worldofunreal.com/auth/callback".into());
+        .unwrap_or_else(|| OAUTH_HUB_CALLBACK.into());
+    if !redirect_allowed(&redirect_uri) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Unsupported redirect_uri"})),
+        ));
+    }
     let state_str = query.state.unwrap_or_else(|| "default_state".into());
 
     let auth_url = state
@@ -97,7 +122,13 @@ pub async fn handle_oauth_callback(
     let redirect_uri = payload
         .redirect_uri
         .or(payload.redirect_url)
-        .unwrap_or_else(|| "https://worldofunreal.com/auth/callback".into());
+        .unwrap_or_else(|| OAUTH_HUB_CALLBACK.into());
+    if !redirect_allowed(&redirect_uri) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Unsupported redirect_uri"})),
+        ));
+    }
 
     // Exchange authorization code for verified user profile info
     let user_info = state

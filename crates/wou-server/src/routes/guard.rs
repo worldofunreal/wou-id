@@ -3,14 +3,22 @@ use axum::http::HeaderMap;
 use crate::state::AppState;
 
 /// Client IP from OUR nginx (the server only listens on loopback, so
-/// X-Real-IP cannot be spoofed from outside). Falls back to "local".
+/// X-Real-IP cannot be spoofed from outside). IPv6 is reduced to its /64
+/// prefix (one end-site, one bucket). Falls back to "local".
 pub fn client_ip(headers: &HeaderMap) -> String {
-    headers
+    let raw = headers
         .get("x-real-ip")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "local".to_string())
+        .unwrap_or_else(|| "local".to_string());
+    match raw.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(v6)) => {
+            let s = v6.segments();
+            format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+        }
+        _ => raw,
+    }
 }
 
 /// Best-effort abuse alert: spawned, never blocks or fails the request path.
@@ -34,9 +42,23 @@ pub async fn fire_admin_alert_once(state: &AppState, key: &str, subject: &str, b
 
 /// Short de-identified tag for logs (no PII on disk).
 pub fn log_tag(email: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    email.to_lowercase().hash(&mut h);
-    format!("{:016x}", h.finish())[..12].to_string()
+    wou_core::key_tag(email)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_client_ip_v4_local_v6() {
+        let mut h = HeaderMap::new();
+        assert_eq!(client_ip(&h), "local");
+        h.insert("x-real-ip", "203.0.113.7".parse().unwrap());
+        assert_eq!(client_ip(&h), "203.0.113.7");
+        h.insert(
+            "x-real-ip",
+            "2806:2f0:5240:fc65:216:ebff:fe87:ff41".parse().unwrap(),
+        );
+        assert_eq!(client_ip(&h), "2806:2f0:5240:fc65::/64");
+    }
 }

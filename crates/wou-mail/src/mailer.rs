@@ -3,7 +3,7 @@ use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::info;
-use wou_core::{GameContext, WouError};
+use wou_core::{key_tag, GameContext, WouError};
 
 use crate::templates::{render_admin_alert, render_otp_email, render_welcome_email};
 use crate::templates::EmailContent;
@@ -120,8 +120,8 @@ impl StalwartMailer {
             .map_err(|e| WouError::MailError(format!("SMTP delivery error: {e}")))?;
 
         info!(
-            "OTP code successfully dispatched to {} from {} ({})",
-            recipient_email,
+            "OTP code successfully dispatched to tag={} from {} ({})",
+            key_tag(recipient_email),
             sender_email,
             context.display_name()
         );

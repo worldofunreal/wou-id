@@ -1,7 +1,7 @@
 use axum::{extract::State, http::HeaderMap, http::StatusCode, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 use tracing::info;
-use wou_core::{AuthProvider, GameContext, PendingOtp, PlayerAccount, WouError};
+use wou_core::{canonical_email, AuthProvider, GameContext, PendingOtp, PlayerAccount, WouError};
 use wou_crypto::generate_secure_otp;
 
 use crate::routes::guard::{client_ip, fire_admin_alert_once, log_tag};
@@ -34,7 +34,7 @@ pub async fn handle_request_otp(
     headers: HeaderMap,
     Json(payload): Json<OtpRequestPayload>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let clean_email = payload.email.trim().to_lowercase();
+    let clean_email = canonical_email(&payload.email);
 
     // Basic email validation
     if !clean_email.contains('@') || !clean_email.contains('.') {
@@ -50,6 +50,20 @@ pub async fn handle_request_otp(
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({"error": "Service in protection mode, try again later"})),
         ));
+    }
+
+    // Global spike detection (botnet signal; alert only, never block here).
+    if let Ok(n) = state.storage.tally_global_minute().await {
+        if n > 100 {
+            let hour = chrono::Utc::now().timestamp() / 3600;
+            fire_admin_alert_once(
+                &state,
+                &format!("spike:{hour}"),
+                "OTP intake spike",
+                format!("{n} OTP requests in the last minute"),
+            )
+            .await;
+        }
     }
 
     // Per-IP gate (NAT-friendly ceilings; blocks alert once per day).
@@ -161,7 +175,7 @@ pub async fn handle_verify_otp(
     State(state): State<AppState>,
     Json(payload): Json<OtpVerifyPayload>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let clean_email = payload.email.trim().to_lowercase();
+    let clean_email = canonical_email(&payload.email);
     let clean_code = payload.code.trim();
 
     // Consume and validate OTP from Valkey

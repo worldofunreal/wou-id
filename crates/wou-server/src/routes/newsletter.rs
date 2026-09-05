@@ -30,7 +30,7 @@ pub async fn handle_newsletter_subscribe(
     State(state): State<AppState>,
     Json(payload): Json<NewsletterSubscribePayload>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let clean_email = payload.email.trim().to_lowercase();
+    let clean_email = wou_core::canonical_email(&payload.email);
     if !clean_email.contains('@') || !clean_email.contains('.') {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -56,7 +56,7 @@ pub async fn handle_newsletter_unsubscribe(
     State(state): State<AppState>,
     Json(payload): Json<NewsletterUnsubscribePayload>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let clean_email = payload.email.trim().to_lowercase();
+    let clean_email = wou_core::canonical_email(&payload.email);
 
     if let Ok(Some(mut account)) = state.storage.find_account_by_email(&clean_email).await {
         account.newsletter_opt_in = false;

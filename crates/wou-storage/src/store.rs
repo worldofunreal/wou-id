@@ -2,7 +2,7 @@ use redb::{Database, ReadableTable, TableDefinition};
 use redis::AsyncCommands;
 use std::sync::Arc;
 use tracing::info;
-use wou_core::{AuthProvider, Clan, ClanMember, PendingOtp, PlayerAccount, PlayerSearchResult, WouError};
+use wou_core::{canonical_email, key_tag, AuthProvider, Clan, ClanMember, PendingOtp, PlayerAccount, PlayerSearchResult, WouError};
 
 const PLAYERS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_players");
 const IDENTITY_INDEX_TABLE: TableDefinition<&str, &str> = TableDefinition::new("wou_identity_index");
@@ -75,7 +75,7 @@ impl WouStorage {
 
     pub async fn save_pending_otp(&self, otp: &PendingOtp, ttl_seconds: u64) -> Result<(), WouError> {
         let mut conn = self.get_redis().await?;
-        let key = format!("wou_otp:{}", otp.email.to_lowercase());
+        let key = format!("wou_otp:{}", key_tag(&canonical_email(&otp.email)));
         let json = serde_json::to_string(otp)
             .map_err(|e| WouError::Internal(format!("OTP serialization error: {e}")))?;
 
@@ -127,14 +127,14 @@ impl WouStorage {
 
     /// Gate an OTP request through the abuse ladder. Counts the attempt.
     pub async fn tally_otp_request(&self, email: &str) -> Result<(), WouError> {
-        let em = email.to_lowercase();
+        let t = key_tag(&canonical_email(email));
         let mut conn = self.get_redis().await?;
-        let ban_key = format!("wou_otp_ban:{em}");
+        let ban_key = format!("wou_otp_ban:{t}");
         let ban: bool = conn.exists(&ban_key).await.unwrap_or(false);
         if ban {
             return Err(WouError::EmailBanned);
         }
-        let pen_key = format!("wou_otp_penalty:{em}");
+        let pen_key = format!("wou_otp_penalty:{t}");
         let penalized: bool = conn.exists(&pen_key).await.unwrap_or(false);
         if penalized {
             // Reoffense during penalty -> ban.
@@ -147,7 +147,7 @@ impl WouStorage {
         drop(conn);
 
         let abuse = self
-            .incr_win(&format!("wou_otp_abuse:{em}"), Self::OTP_ABUSE_WINDOW_SECS)
+            .incr_win(&format!("wou_otp_abuse:{t}"), Self::OTP_ABUSE_WINDOW_SECS)
             .await?;
         if abuse > Self::OTP_ABUSE_MAX {
             let mut conn = self.get_redis().await?;
@@ -158,7 +158,7 @@ impl WouStorage {
             return Err(WouError::OtpPenalized(Self::OTP_PENALTY_SECS as u64));
         }
 
-        let win_key = format!("wou_otp_window:{em}");
+        let win_key = format!("wou_otp_window:{t}");
         let n = self.incr_win(&win_key, Self::OTP_REQ_WINDOW_SECS).await?;
         if n > Self::OTP_REQ_MAX {
             return Err(WouError::OtpThrottled(self.ttl_of(&win_key).await));
@@ -201,6 +201,24 @@ impl WouStorage {
         }
     }
 
+    /// GET+DEL a short-lived cache string (web3 nonces: single-use).
+    pub async fn take_cache_string(&self, key: &str) -> Result<Option<String>, WouError> {
+        let mut conn = self.get_redis().await?;
+        let val: Option<String> = conn
+            .get(key)
+            .await
+            .map_err(|e| WouError::DatabaseError(format!("Redis GET failed: {e}")))?;
+        if val.is_some() {
+            let _: () = conn.del(key).await.unwrap_or(());
+        }
+        Ok(val)
+    }
+
+    /// Global OTP intake per minute (spike detection for the circuit breaker).
+    pub async fn tally_global_minute(&self) -> Result<u64, WouError> {
+        self.incr_win("wou_otp_global_min", 90).await
+    }
+
     /// Toggle protection mode programmatically (ops use valkey-cli; tests use this).
     pub async fn set_protection_mode(&self, on: bool) -> Result<(), WouError> {
         let mut conn = self.get_redis().await?;
@@ -220,7 +238,8 @@ impl WouStorage {
 
     pub async fn get_and_consume_otp(&self, email: &str, code: &str) -> Result<PendingOtp, WouError> {
         let mut conn = self.get_redis().await?;
-        let key = format!("wou_otp:{}", email.to_lowercase());
+        let t = key_tag(&canonical_email(email));
+        let key = format!("wou_otp:{t}");
         let json: Option<String> = conn
             .get(&key)
             .await
@@ -236,11 +255,10 @@ impl WouStorage {
         if pending.code != code {
             // Wrong guess: count it, feed the same abuse ladder (organic link),
             // and burn the code after OTP_GUESS_MAX failures.
-            let em = email.to_lowercase();
-            let fail_key = format!("wou_otp_fail:{em}");
+            let fail_key = format!("wou_otp_fail:{t}");
             let fails = self.incr_win(&fail_key, 600).await.unwrap_or(1);
             let _ = self
-                .incr_win(&format!("wou_otp_abuse:{em}"), Self::OTP_ABUSE_WINDOW_SECS)
+                .incr_win(&format!("wou_otp_abuse:{t}"), Self::OTP_ABUSE_WINDOW_SECS)
                 .await;
             if fails >= Self::OTP_GUESS_MAX {
                 let _: () = conn.del(&key).await.unwrap_or(());
@@ -252,7 +270,7 @@ impl WouStorage {
         // Consume OTP (Delete from Redis) + reset guess counter.
         let _: () = conn.del(&key).await.unwrap_or(());
         let _: () = conn
-            .del(format!("wou_otp_fail:{}", email.to_lowercase()))
+            .del(format!("wou_otp_fail:{t}"))
             .await
             .unwrap_or(());
 

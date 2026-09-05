@@ -1,6 +1,28 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Canonical email for abuse keys: trimmed, lowercased, plus-tag stripped
+/// (`victim+1@x.com` and `victim@x.com` share one bucket — same mailbox).
+pub fn canonical_email(email: &str) -> String {
+    let clean = email.trim().to_lowercase();
+    match clean.split_once('@') {
+        Some((local, domain)) => {
+            let base = local.split('+').next().unwrap_or(local);
+            format!("{base}@{domain}")
+        }
+        None => clean,
+    }
+}
+
+/// Short de-identified tag (Valkey keys, logs): no PII at rest or on disk.
+pub fn key_tag(s: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    s.to_lowercase().hash(&mut h);
+    format!("{:016x}", h.finish())[..12].to_string()
+}
+
 /// Universal Game Context identifying the origin game or app within the World of Unreal ecosystem.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "snake_case")]
