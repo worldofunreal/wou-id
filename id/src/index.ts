@@ -14,6 +14,13 @@ export const TERMS_URL = 'https://worldofunreal.com/terms';
 // Single sender for the whole org.
 export const SENDER_EMAIL = 'no-reply@worldofunreal.com';
 
+// Swappable transport (default: global fetch). Electron hosts inject their
+// main-process proxy here so every SDK call flows through it.
+let fetchImpl: typeof fetch = (...args) => fetch(...args);
+export function setFetchImpl(fn: typeof fetch): void {
+  fetchImpl = fn;
+}
+
 /** 13+ check. DOB is validated client-side only — never stored or sent. */
 export function is13Plus(year: number, month: number, day: number, now = new Date()): boolean {
   const dob = new Date(year, month - 1, day);
@@ -236,7 +243,7 @@ export class WouAuthClient {
   public async getMe(): Promise<PlayerAccount | null> {
     if (!this.sessionToken) return null;
     try {
-      const res = await fetch(`${ID_SERVER_URL}/api/v1/auth/me`, {
+      const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/me`, {
         headers: { Authorization: `Bearer ${this.sessionToken}` },
       });
       if (!res.ok) return null;
@@ -251,7 +258,7 @@ export class WouAuthClient {
   public async refreshSession(): Promise<AuthResponse | null> {
     if (!this.sessionToken) return null;
     try {
-      const res = await fetch(`${ID_SERVER_URL}/api/v1/auth/refresh`, {
+      const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/refresh`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${this.sessionToken}` },
       });
@@ -270,7 +277,7 @@ export class WouAuthClient {
 
   public async startQr(context?: GameContext | { context?: GameContext; username?: string }): Promise<{ id: string; approve_url: string; secret: string; expires_in_seconds: number; notified?: string[] }> {
     const opts = typeof context === 'object' ? context : { context };
-    const res = await fetch(`${ID_SERVER_URL}/api/v1/auth/qr/start`, {
+    const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/qr/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ context: opts.context || this.defaultContext, username: opts.username || '' }),
@@ -281,7 +288,7 @@ export class WouAuthClient {
   }
 
   public async qrStatus(id: string, secret: string): Promise<{ status: string; account?: PlayerAccount; session_token?: string }> {
-    const res = await fetch(`${ID_SERVER_URL}/api/v1/auth/qr/${encodeURIComponent(id)}/status`, {
+    const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/qr/${encodeURIComponent(id)}/status`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ secret }),
@@ -293,7 +300,7 @@ export class WouAuthClient {
   }
 
   public async qrCancel(id: string, secret: string): Promise<void> {
-    await fetch(`${ID_SERVER_URL}/api/v1/auth/qr/${encodeURIComponent(id)}/cancel`, {
+    await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/qr/${encodeURIComponent(id)}/cancel`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ secret }),
@@ -302,7 +309,7 @@ export class WouAuthClient {
 
   public async botLinkStart(): Promise<{ code: string; expires_in_seconds: number }> {
     if (!this.sessionToken) throw new Error('Sign in first.');
-    const res = await fetch(`${ID_SERVER_URL}/api/v1/bots/link/start`, {
+    const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/bots/link/start`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${this.sessionToken}` },
     });
@@ -315,7 +322,7 @@ export class WouAuthClient {
     const empty = { telegram: false, discord: false, telegram_ids: [], discord_ids: [] };
     if (!this.sessionToken) return empty;
     try {
-      const res = await fetch(`${ID_SERVER_URL}/api/v1/bots/linked`, {
+      const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/bots/linked`, {
         headers: { Authorization: `Bearer ${this.sessionToken}` },
       });
       if (!res.ok) return empty;
@@ -327,7 +334,7 @@ export class WouAuthClient {
 
   public async botUnlink(ns: 'tg' | 'dc', external_id: string): Promise<void> {
     if (!this.sessionToken) throw new Error('Sign in first.');
-    const res = await fetch(`${ID_SERVER_URL}/api/v1/bots/link/${ns}`, {
+    const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/bots/link/${ns}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.sessionToken}` },
       body: JSON.stringify({ external_id }),
@@ -338,7 +345,7 @@ export class WouAuthClient {
 
   public async approveQr(id: string, secret: string): Promise<void> {
     if (!this.sessionToken) throw new Error('Sign in on this device first.');
-    const res = await fetch(`${ID_SERVER_URL}/api/v1/auth/qr/${encodeURIComponent(id)}/approve`, {
+    const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/qr/${encodeURIComponent(id)}/approve`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.sessionToken}` },
       body: JSON.stringify({ secret }),
@@ -372,7 +379,7 @@ export class WouAuthClient {
   // ==========================================
 
   public async startAnonymous(context?: GameContext, displayName?: string): Promise<AuthResponse> {
-    const res = await fetch(`${ID_SERVER_URL}/api/v1/auth/anonymous`, {
+    const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/anonymous`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -397,7 +404,7 @@ export class WouAuthClient {
 
   /** Canonical OTP request used by every modal (web + Hyper). */
   public async requestOtp(email: string, newsletterOptIn = true, context?: GameContext): Promise<{ status: string; message: string }> {
-    const res = await fetch(`${ID_SERVER_URL}/api/v1/auth/otp/request`, {
+    const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/otp/request`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -418,7 +425,7 @@ export class WouAuthClient {
 
   /** Canonical OTP verify used by every modal (web + Hyper). Third arg may be a legacy newsletter boolean (ignored: opt-in is captured at request time). */
   public async verifyOtp(email: string, code: string, context?: GameContext | boolean): Promise<AuthResponse> {
-    const res = await fetch(`${ID_SERVER_URL}/api/v1/auth/otp/verify`, {
+    const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/otp/verify`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -484,7 +491,7 @@ export class WouAuthClient {
   }
 
   public async handleOAuthCallback(provider: string, code: string): Promise<AuthResponse> {
-    const res = await fetch(`${ID_SERVER_URL}/api/v1/auth/oauth/callback/${provider}`, {
+    const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/oauth/callback/${provider}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -513,7 +520,7 @@ export class WouAuthClient {
     const accounts = await ethereum.request({ method: 'eth_requestAccounts' });
     const publicAddress = accounts[0];
 
-    const challengeRes = await fetch(`${ID_SERVER_URL}/api/v1/auth/web3/challenge`, {
+    const challengeRes = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/web3/challenge`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chain: 'ethereum', public_address: publicAddress }),
@@ -526,7 +533,7 @@ export class WouAuthClient {
       params: [challengeData.message, publicAddress],
     });
 
-    const verifyRes = await fetch(`${ID_SERVER_URL}/api/v1/auth/web3/verify`, {
+    const verifyRes = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/web3/verify`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -557,7 +564,7 @@ export class WouAuthClient {
     const connectResp = await phantom.connect();
     const publicAddress = connectResp.publicKey.toString();
 
-    const challengeRes = await fetch(`${ID_SERVER_URL}/api/v1/auth/web3/challenge`, {
+    const challengeRes = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/web3/challenge`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chain: 'solana', public_address: publicAddress }),
@@ -574,7 +581,7 @@ export class WouAuthClient {
       signatureHex = '0x' + sigArr.map((b) => b.toString(16).padStart(2, '0')).join('');
     }
 
-    const verifyRes = await fetch(`${ID_SERVER_URL}/api/v1/auth/web3/verify`, {
+    const verifyRes = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/web3/verify`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -609,7 +616,7 @@ export class WouAuthClient {
             const identity = authClient.getIdentity();
             const principal = identity.getPrincipal().toText();
 
-            const challengeRes = await fetch(`${ID_SERVER_URL}/api/v1/auth/web3/challenge`, {
+            const challengeRes = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/web3/challenge`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ chain: 'icp', public_address: principal }),
@@ -617,7 +624,7 @@ export class WouAuthClient {
             const challengeData = await challengeRes.json();
             if (!challengeRes.ok) throw new Error(challengeData.error || 'Failed to challenge ICP identity.');
 
-            const verifyRes = await fetch(`${ID_SERVER_URL}/api/v1/auth/web3/verify`, {
+            const verifyRes = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/web3/verify`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
@@ -659,7 +666,7 @@ export class WouAuthClient {
       throw new Error('WebAuthn / Passkeys are not supported on this browser.');
     }
 
-    const challengeRes = await fetch(`${ID_SERVER_URL}/api/v1/auth/web3/challenge`, {
+    const challengeRes = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/web3/challenge`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chain: 'passkey', public_address: this.user?.username || 'anonymous' }),
@@ -679,7 +686,7 @@ export class WouAuthClient {
 
     if (!credential) throw new Error('Passkey authentication cancelled or failed.');
 
-    const verifyRes = await fetch(`${ID_SERVER_URL}/api/v1/auth/web3/verify`, {
+    const verifyRes = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/web3/verify`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -707,7 +714,7 @@ export class WouAuthClient {
     const clean = query.trim();
     if (!clean) return [];
     try {
-      const res = await fetch(`${ID_SERVER_URL}/api/v1/user/search?q=${encodeURIComponent(clean)}&limit=${limit}`);
+      const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/user/search?q=${encodeURIComponent(clean)}&limit=${limit}`);
       if (!res.ok) return [];
       return await res.json();
     } catch {
@@ -717,7 +724,7 @@ export class WouAuthClient {
 
   public async getClans(limit: number = 20): Promise<Clan[]> {
     try {
-      const res = await fetch(`${ID_SERVER_URL}/api/v1/clans/list?limit=${limit}`);
+      const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/clans/list?limit=${limit}`);
       if (!res.ok) return [];
       return await res.json();
     } catch {
@@ -727,7 +734,7 @@ export class WouAuthClient {
 
   public async getClanDetails(tag: string): Promise<ClanDetails | null> {
     try {
-      const res = await fetch(`${ID_SERVER_URL}/api/v1/clans/${encodeURIComponent(tag)}`);
+      const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/clans/${encodeURIComponent(tag)}`);
       if (!res.ok) return null;
       return await res.json();
     } catch {
@@ -741,7 +748,7 @@ export class WouAuthClient {
 
   public async createClan(tag: string, name: string, description: string, emblemIcon: string = '🛡️'): Promise<Clan> {
     if (!this.sessionToken) throw new Error('Authentication required to form a clan.');
-    const res = await fetch(`${ID_SERVER_URL}/api/v1/clans/create`, {
+    const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/clans/create`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -761,7 +768,7 @@ export class WouAuthClient {
 
   public async joinClan(tag: string): Promise<{ status: string }> {
     if (!this.sessionToken) throw new Error('Authentication required to join clan.');
-    const res = await fetch(`${ID_SERVER_URL}/api/v1/clans/${encodeURIComponent(tag)}/join`, {
+    const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/clans/${encodeURIComponent(tag)}/join`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -780,7 +787,7 @@ export class WouAuthClient {
 
   public async leaveClan(tag: string): Promise<{ status: string }> {
     if (!this.sessionToken) throw new Error('Authentication required to leave clan.');
-    const res = await fetch(`${ID_SERVER_URL}/api/v1/clans/${encodeURIComponent(tag)}/leave`, {
+    const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/clans/${encodeURIComponent(tag)}/leave`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -795,6 +802,25 @@ export class WouAuthClient {
       this.setSession(this.sessionToken, this.user);
     }
     return data;
+  }
+
+  public async getFeed(limit: number = 20): Promise<any[]> {
+    if (!this.sessionToken) return [];
+    const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/social/feed?limit=${limit}`, {
+      headers: { Authorization: `Bearer ${this.sessionToken}` },
+    });
+    if (!res.ok) return [];
+    return res.json();
+  }
+
+  public async follow(id: string): Promise<void> {
+    if (!this.sessionToken) throw new Error('Authentication required to follow.');
+    const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/social/follow/${encodeURIComponent(id)}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${this.sessionToken}` },
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to follow.');
   }
 }
 
