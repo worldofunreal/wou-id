@@ -251,3 +251,43 @@ fn test_security_templates() {
     let a = wou_mail::templates::render_admin_alert("Email banned", "tag=abc error=x");
     assert!(a.subject.starts_with("[WOU-ALERT]"));
 }
+
+/// Plus-addressing shares one abuse bucket (same mailbox).
+#[tokio::test]
+async fn test_plus_address_sharing() {
+    let Some(storage) = live_storage_db(8).await else { return };
+    let base = format!("plustest_{}@worldofunreal.com", uuid::Uuid::new_v4());
+    let v1 = base.replacen('@', "+1@", 1);
+    let v2 = base.replacen('@', "+2@", 1);
+    let v3 = base.replacen('@', "+3@", 1);
+    storage.tally_otp_request(&v1).await.unwrap();
+    storage.tally_otp_request(&v2).await.unwrap();
+    storage.tally_otp_request(&v3).await.unwrap();
+    // Bare address hits the same exhausted bucket.
+    assert!(is_throttled(&storage.tally_otp_request(&base).await.unwrap_err()));
+}
+
+/// Nonce cache is single-use (web3 challenge binding).
+#[tokio::test]
+async fn test_nonce_single_use() {
+    let Some(storage) = live_storage_db(9).await else { return };
+    let key = format!("wou_web3_nonce:test:{}", uuid::Uuid::new_v4());
+    storage.save_cache_string(&key, "nonce-abc", 300).await.unwrap();
+    assert_eq!(storage.take_cache_string(&key).await.unwrap(), Some("nonce-abc".to_string()));
+    assert_eq!(storage.take_cache_string(&key).await.unwrap(), None);
+}
+
+/// Canonical email + key tags are pure and stable.
+#[test]
+fn test_canonical_and_tags() {
+    assert_eq!(
+        wou_core::canonical_email("Victim+1@X.com "),
+        "victim@x.com"
+    );
+    assert_eq!(wou_core::canonical_email("a@b"), "a@b");
+    let t1 = wou_core::key_tag("Victim@X.com");
+    let t2 = wou_core::key_tag("victim@x.com");
+    assert_eq!(t1, t2);
+    assert_eq!(t1.len(), 12);
+    assert!(!t1.contains('@'));
+}

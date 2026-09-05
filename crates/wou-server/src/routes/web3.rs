@@ -72,6 +72,32 @@ pub async fn handle_web3_verify(
         }
     };
 
+    // Internet Identity is disabled server-side: principal text is NOT proof of
+    // ownership (no delegation verification yet). Format checks authenticate nobody.
+    if provider == AuthProvider::InternetIdentity {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "Internet Identity login is temporarily disabled"})),
+        ));
+    }
+
+    // Enforce the challenge nonce: single-use, 5-minute window, bound to the message.
+    // (Without this, any valid signature over any message would authenticate.)
+    let nonce_key = format!(
+        "wou_web3_nonce:{}:{}",
+        chain,
+        payload.public_address.to_lowercase()
+    );
+    match state.storage.take_cache_string(&nonce_key).await {
+        Ok(Some(nonce)) if payload.message.contains(&nonce) => {}
+        _ => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Challenge expired or already used"})),
+            ))
+        }
+    }
+
     // Verify cryptographic signature
     let is_valid = match provider {
         AuthProvider::Solana => verify_solana_signature(&payload.public_address, &payload.message, &payload.signature),
