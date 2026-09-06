@@ -398,10 +398,6 @@ export class WouAuthClient {
   // EMAIL OTP AUTHENTICATION
   // ==========================================
 
-  public async sendEmailOtp(email: string): Promise<{ status: string; message: string }> {
-    return this.requestOtp(email, false);
-  }
-
   /** Canonical OTP request used by every modal (web + Hyper). */
   public async requestOtp(email: string, newsletterOptIn = false, context?: GameContext): Promise<{ status: string; message: string }> {
     const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/otp/request`, {
@@ -439,10 +435,6 @@ export class WouAuthClient {
       message = `Too many codes requested. Wait ${wait} before trying again.`;
     }
     return retryAfterSeconds === undefined ? { message } : { message, retryAfterSeconds };
-  }
-
-  public async verifyEmailOtp(email: string, code: string, context?: GameContext): Promise<AuthResponse> {
-    return this.verifyOtp(email, code, context);
   }
 
   /** Canonical OTP verify used by every modal (web + Hyper). Third arg may be a legacy newsletter boolean (ignored: opt-in is captured at request time). */
