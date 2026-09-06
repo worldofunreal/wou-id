@@ -41,7 +41,7 @@ the code is the source of truth; this file explains intent and operations.
 | OAuth pin / web3 nonce / upload enum | `routes/oauth.rs`, `routes/web3.rs`, `routes/upload.rs` |
 | Welcome (once, verified email only) + admin alerts | `wou-mail/src/{mailer,templates}.rs` |
 | Client cooldowns + `retry_after_seconds` | `@worldofunreal/id` (`describeOtpError`) + modals |
-| nginx outer wall + HSTS | `deploy/id.worldofunreal.com.conf` |
+| nginx outer wall + HSTS | `deploy/id.worldofunreal.com.conf` (synced by `./wou` AND Actions deploy) |
 
 ## Operations runbook (read-only first)
 
@@ -75,8 +75,9 @@ Lift a ban/penalty early (appeal granted):
 valkey-cli -n 1 DEL "wou_otp_ban:<tag>" "wou_otp_penalty:<tag>"
 ```
 
-Mailbox rotation (backup first, official CLI only — auth per the
-server-side Stalwart guide, never in this repo):
+Mailbox / admin rotation (backup first, official CLI only; Stalwart admin
+auth lives server-side in `/root/STALWART_ADMIN.md` (0600) and the jail's
+`rc.conf` — never in this repo):
 
 ```bash
 ts=$(date +%s); sudo sqlite3 /zroot/jails/mail/var/db/stalwart/stalwart.db \
@@ -84,6 +85,15 @@ ts=$(date +%s); sudo sqlite3 /zroot/jails/mail/var/db/stalwart/stalwart.db \
 # stcli query account  -> locate Id
 # stcli update Account <id> --field 'credentials={"0":{"secret":"<new>","@type":"Password"}}'
 # verify: JMAP https://mail.worldofunreal.com/jmap/session must return 200
+```
+
+Recovery admin rotation (brief mail downtime; edit `STALWART_RECOVERY_ADMIN`
+in `/zroot/jails/mail/etc/rc.conf`, restart the service inside the jail, then
+update all guide copies and keep them `0600`):
+
+```bash
+sudo jexec mail service stalwart restart
+# verify OLD admin -> 401, NEW admin -> `stcli query domain` lists domains
 ```
 
 Env rotation (additive edits only, then one restart; sessions reset on JWT change):
@@ -120,6 +130,10 @@ Deploy (never manual binary swaps):
 - 2026-09-05: `/etc/hosts` pins `mail.worldofunreal.com` → 127.0.0.1 on the
   host (avoids gateway hairpin for local SMTP).
 - 2026-09-05: `security@worldofunreal.com` created (appeals + monitoring).
+- 2026-09-05: Stalwart recovery admin rotated (rc.conf edit + service restart;
+  old credential invalidated, verified 401/200; guide copies updated to 0600).
+- 2026-09-05: Actions deploy now syncs `deploy/wou_id.rc.d` + nginx conf
+  (sha256 parity verified repo↔remote; HSTS + `limit_req` live).
 
 ## For future agents (context without archaeology)
 
