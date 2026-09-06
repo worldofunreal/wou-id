@@ -1,4 +1,4 @@
-# 📖 WOU-ID Client SDK — Guía Oficial para Agentes de IA
+# WOU-ID Client SDK — Guía Oficial para Agentes de IA
 
 Esta guía es de lectura obligatoria para cualquier agente antes de integrar autenticación en `worldofunreal.com`, `cosmicrafts.com`, `nftropoly.com`, `shadowsofwar.io` o cualquier nuevo frontend.
 
@@ -42,7 +42,7 @@ Para evitar errores de `redirect_uri_mismatch` en Google Cloud Console, Discord 
 
 ### A. Métodos de Sesión
 ```typescript
-import { wouAuth, type PlayerAccount } from './wou-auth';
+import { wouAuth, type PlayerAccount } from '@worldofunreal/id';
 
 // Estado actual
 const user: PlayerAccount | null = wouAuth.getUser();
@@ -60,14 +60,17 @@ window.addEventListener('wou:auth-state-change', (e: any) => {
 // Social OAuth (Google, Discord, Twitter, Meta)
 wouAuth.loginWithOAuth('google'); // o alias wouAuth.loginWithSocial('google')
 
-// Email OTP
-await wouAuth.sendEmailOtp('jugador@gmail.com');
-await wouAuth.verifyEmailOtp('jugador@gmail.com', '123456');
+// Email OTP (newsletter opt-in SIEMPRE explícito, default false)
+await wouAuth.requestOtp('jugador@gmail.com', false);
+await wouAuth.verifyOtp('jugador@gmail.com', '123456');
+
+// Manejo de fallos OTP (429 con espera del servidor, cooldown visible):
+const { message, retryAfterSeconds } = wouAuth.describeOtpError(err);
 
 // Web3
 await wouAuth.loginWithEthereum(); // o alias wouAuth.loginWithEvm()
 await wouAuth.loginWithSolana();
-await wouAuth.loginWithInternetIdentity(); // o alias wouAuth.loginWithIcp()
+await wouAuth.loginWithInternetIdentity(); // DESHABILITADO server-side (sin verificación de delegación; no integrar aún)
 
 // WebAuthn / Passkeys
 await wouAuth.loginWithPasskey();
