@@ -85,6 +85,20 @@ jobs:
             sudo service wou_id restart
           EOF
 
+      - name: Sync Versioned Configurations (rc.d + nginx)
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << 'EOF'
+            set -e
+            ts=$(date +%s)
+            echo "[cfg 1/2] rc.d wou_id..."
+            [ -f /usr/local/etc/rc.d/wou_id ] && sudo cp /usr/local/etc/rc.d/wou_id /usr/local/etc/rc.d/wou_id.bak_${ts} || true
+            sudo install -o root -g wheel -m 755 ~/.wou-id-build/deploy/wou_id.rc.d /usr/local/etc/rc.d/wou_id
+            echo "[cfg 2/2] nginx id.worldofunreal.com.conf..."
+            [ -f /usr/local/etc/nginx/conf.d/id.worldofunreal.com.conf ] && sudo cp /usr/local/etc/nginx/conf.d/id.worldofunreal.com.conf /usr/local/etc/nginx/conf.d/id.worldofunreal.com.conf.bak_${ts} || true
+            sudo install -o root -g wheel -m 644 ~/.wou-id-build/deploy/id.worldofunreal.com.conf /usr/local/etc/nginx/conf.d/id.worldofunreal.com.conf
+            sudo nginx -t && sudo service nginx reload
+          EOF
+
       - name: Verify Backend Health
         run: |
           sleep 2
