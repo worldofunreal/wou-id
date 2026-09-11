@@ -41,6 +41,17 @@ pub async fn handle_web3_challenge(
     State(state): State<AppState>,
     Json(payload): Json<Web3ChallengeRequest>,
 ) -> Result<Json<Web3ChallengeResponse>, (StatusCode, Json<serde_json::Value>)> {
+    // Internet Identity is disabled server-side (see handle_web3_verify):
+    // don't mint single-use nonces that could never verify.
+    match payload.chain.to_lowercase().as_str() {
+        "icp" | "internet_identity" | "id_ai" => {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Internet Identity login is temporarily disabled"})),
+            ))
+        }
+        _ => {}
+    }
     let nonce = uuid::Uuid::new_v4().to_string();
     let timestamp = chrono::Utc::now().timestamp();
     let message = format!(
@@ -98,11 +109,11 @@ pub async fn handle_web3_verify(
         }
     }
 
-    // Verify cryptographic signature
+    // Verify cryptographic signature.
+    // (Internet Identity returns 503 above, so no arm is needed here.)
     let is_valid = match provider {
         AuthProvider::Solana => verify_solana_signature(&payload.public_address, &payload.message, &payload.signature),
         AuthProvider::Ethereum => verify_ethereum_signature(&payload.public_address, &payload.message, &payload.signature),
-        AuthProvider::InternetIdentity => wou_crypto::web3::validate_icp_principal(&payload.public_address),
         _ => Ok(false),
     };
 

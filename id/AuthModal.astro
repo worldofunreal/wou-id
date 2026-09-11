@@ -177,14 +177,6 @@ const {
         </div>
         <span class="text-xs text-cyan-400 font-mono">Web3</span>
       </button>
-
-      <button id="web3-icp" class="w-full py-3 px-4 rounded-xl bg-[#29ABE2]/15 border border-[#29ABE2]/30 hover:bg-[#29ABE2]/25 text-white text-sm font-semibold flex items-center justify-between transition-all cursor-pointer">
-        <div class="flex items-center gap-3">
-          <div class="w-5 h-5 rounded-full bg-[#29ABE2] flex items-center justify-center font-bold text-zinc-950 text-xs">∞</div>
-          <span>Internet Identity (id.ai)</span>
-        </div>
-        <span class="text-xs text-cyan-400 font-mono">ICP</span>
-      </button>
     </div>
   </div>
 </div>
@@ -422,16 +414,6 @@ const {
       modal?.classList.add('hidden');
     } catch (err: any) {
       showError(err.message || 'Ethereum authentication failed.');
-    }
-  });
-
-  document.getElementById('web3-icp')?.addEventListener('click', async () => {
-    hideError();
-    try {
-      await wouAuth.loginWithInternetIdentity();
-      modal?.classList.add('hidden');
-    } catch (err: any) {
-      showError(err.message || 'Internet Identity authentication failed.');
     }
   });
 

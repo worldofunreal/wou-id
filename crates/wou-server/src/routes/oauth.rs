@@ -10,12 +10,20 @@ use wou_core::{AuthProvider, GameContext, PlayerAccount};
 
 use crate::state::AppState;
 
-/// OAuth redirect targets are pinned: the central hub plus loopback (dev).
-/// Providers also enforce their own allowlists; this is defense in depth.
+/// OAuth redirect targets are pinned: the central hub plus explicit per-game
+/// callbacks (one-click login without hub bounce) plus loopback (dev).
+/// Every non-loopback entry must ALSO be registered in the provider consoles
+/// (Google Cloud Console / Discord Dev Portal authorized redirect URIs).
+/// Providers enforce their own allowlists; this is defense in depth.
 pub const OAUTH_HUB_CALLBACK: &str = "https://worldofunreal.com/auth/callback";
 
+/// Direct game callbacks. To add a game: append its
+/// `https://<domain>/auth/callback` here AND register the exact same URI
+/// in the provider consoles, otherwise providers reject with redirect_uri_mismatch.
+pub const OAUTH_GAME_CALLBACKS: &[&str] = &["https://shadowsofwar.io/auth/callback"];
+
 fn redirect_allowed(uri: &str) -> bool {
-    if uri == OAUTH_HUB_CALLBACK {
+    if uri == OAUTH_HUB_CALLBACK || OAUTH_GAME_CALLBACKS.contains(&uri) {
         return true;
     }
     let host = uri
