@@ -2,21 +2,64 @@
 #
 # One-time setup (human, npm UI): package Settings -> Trusted Publisher ->
 # GitHub Actions -> org/user + repo `wou-id` + workflow `publish.yml`.
-# After that, publishing is: version bump in id/package.json, then
-#   git tag id-1.0.3 && git push origin id-1.0.3
+#
+# REGLA DE VERSION (poka-yoke, no negociable):
+#   - Por tag (id-X.Y.Z) SOLO avanza el parche: x.x.Y+1 sobre `latest`.
+#   - Major/minor UNICAMENTE por `workflow_dispatch` manual con la version
+#     escrita a mano en `confirm_version` (= orden explicita del owner).
+#   - El tag siempre debe cuadrar exacto con id/package.json.
+#
+# Flujo normal: bump x.x.Y en id/package.json, commit, push main,
+#   git tag id-X.Y.Z && git push worldofunreal id-X.Y.Z
 name: Publish @worldofunreal/id
 
 on:
   push:
     tags:
       - "id-*"
+  workflow_dispatch:
+    inputs:
+      confirm_version:
+        description: "SOLO saltos major/minor ordenados por el owner. Escribe la version exacta de id/package.json."
+        required: true
+        default: ""
 
 permissions:
   contents: read
   id-token: write
 
 jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Poka-yoke de version
+        run: |
+          set -euo pipefail
+          PKG_VER=$(node -p "require('./id/package.json').version")
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            [ "${{ inputs.confirm_version }}" = "$PKG_VER" ] \
+              || { echo "POKA-YOKE: confirm_version no coincide con id/package.json ($PKG_VER)"; exit 1; }
+            echo "OVERRIDE manual: major/minor permitido para $PKG_VER"
+            exit 0
+          fi
+          TAG="${GITHUB_REF_NAME}"
+          [ "$TAG" = "id-$PKG_VER" ] \
+            || { echo "POKA-YOKE: tag $TAG != id/package.json ($PKG_VER)"; exit 1; }
+          LATEST=$(npm view @worldofunreal/id version)
+          MAJ_MIN_PKG="${PKG_VER%.*}"; MAJ_MIN_LAT="${LATEST%.*}"
+          PATCH_PKG="${PKG_VER##*.}"; PATCH_LAT="${LATEST##*.}"
+          [ "$MAJ_MIN_PKG" = "$MAJ_MIN_LAT" ] \
+            || { echo "POKA-YOKE: por tag solo parches ($LATEST -> $PKG_VER). Major/minor solo por dispatch manual."; exit 1; }
+          [ "$PATCH_PKG" -eq $((PATCH_LAT + 1)) ] \
+            || { echo "POKA-YOKE: el parche debe ser $LATEST + 1 (pedido: $PKG_VER)"; exit 1; }
+          echo "OK: $LATEST -> $PKG_VER (parche +1, tag cuadra)"
+
   publish:
+    needs: guard
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
