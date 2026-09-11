@@ -109,17 +109,6 @@ pub fn verify_solana_signature(
     }
 }
 
-/// Validate ICP / Internet Identity Principal format (e.g. `2vxsx-fae` or `aaaaa-aa`).
-pub fn validate_icp_principal(principal_text: &str) -> Result<bool, WouError> {
-    let clean = principal_text.trim();
-    if clean.is_empty() || clean.len() > 64 {
-        return Ok(false);
-    }
-    // Standard ICP principal text format uses lowercase alphanumeric + hyphens
-    let is_valid = clean.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-    Ok(is_valid)
-}
-
 /// Deterministically derives embedded multi-chain wallets (EVM, Solana, ICP, Bitcoin)
 /// for any Web2 player account (Google, Discord, Email OTP) with zero user friction.
 pub fn derive_embedded_wallets(account_id: &str, secret_seed: &str) -> wou_core::EmbeddedWallets {
@@ -240,13 +229,5 @@ mod tests {
 
         let is_valid = verify_ethereum_signature(&expected_address, message, &sig_hex).unwrap();
         assert!(is_valid);
-    }
-
-    #[test]
-    fn test_validate_icp_principal() {
-        assert!(validate_icp_principal("2vxsx-fae").unwrap());
-        assert!(validate_icp_principal("aaaaa-aa").unwrap());
-        assert!(validate_icp_principal("yrm6q-yyaaa-aaaap-qb6ka-cai").unwrap());
-        assert!(!validate_icp_principal("Invalid Principal!@#").unwrap());
     }
 }

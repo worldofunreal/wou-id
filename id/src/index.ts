@@ -208,7 +208,7 @@ export class WouAuthClient {
       localStorage.setItem('wou_user_data', JSON.stringify(account));
       window.dispatchEvent(
         new CustomEvent('wou:auth-state-change', {
-          detail: { authenticated: true, user: account, token },
+          detail: { authenticated: true, isAuthenticated: true, user: account, token },
         })
       );
     }
@@ -222,7 +222,7 @@ export class WouAuthClient {
       localStorage.removeItem('wou_user_data');
       window.dispatchEvent(
         new CustomEvent('wou:auth-state-change', {
-          detail: { authenticated: false, user: null, token: null },
+          detail: { authenticated: false, isAuthenticated: false, user: null, token: null },
         })
       );
     }
@@ -461,15 +461,22 @@ export class WouAuthClient {
   // ==========================================
 
   /**
-   * Dispatches user to OAuth Provider using the Centralized World of Unreal Identity Hub.
-   * Google/Discord will redirect to https://worldofunreal.com/auth/callback (which is 100% authorized),
-   * and the hub will redirect back to this application's current URL with the authenticated session token.
+   * Dispatches user to OAuth Provider.
+   *
+   * Default is the centralized hub (https://worldofunreal.com/auth/callback),
+   * which exchanges the code and bounces back to this app with the session.
+   * Games should pass their own `{ redirectUri: 'https://<game>/auth/callback' }`
+   * for one-click login with a single bounce (game -> provider -> game).
+   * The URI must be allowlisted server-side AND registered in the provider
+   * consoles (Google Cloud Console / Discord Dev Portal).
    *
    * Crucial: The provider is serialized inside the `state` JSON payload to avoid domain-isolated sessionStorage loss.
    */
-  public loginWithOAuth(provider: SocialProvider): void {
+  public loginWithOAuth(provider: SocialProvider, opts?: { redirectUri?: string; context?: GameContext }): void {
     const returnTo = typeof window !== 'undefined' ? window.location.href : '';
     const accountId = this.user?.id || '';
+    const redirectUri = opts?.redirectUri || AUTH_HUB_CALLBACK_URL;
+    if (opts?.context) this.defaultContext = opts.context;
 
     if (typeof window !== 'undefined') {
       sessionStorage.setItem('wou_oauth_provider', provider);
@@ -492,7 +499,7 @@ export class WouAuthClient {
     }
 
     const targetUrl = `${ID_SERVER_URL}/api/v1/auth/oauth/login/${provider}?redirect_uri=${encodeURIComponent(
-      AUTH_HUB_CALLBACK_URL
+      redirectUri
     )}&state=${encodeURIComponent(statePayload)}`;
 
     if (typeof window !== 'undefined') {
@@ -504,13 +511,13 @@ export class WouAuthClient {
     return this.loginWithOAuth(provider);
   }
 
-  public async handleOAuthCallback(provider: string, code: string): Promise<AuthResponse> {
+  public async handleOAuthCallback(provider: string, code: string, opts?: { redirectUri?: string }): Promise<AuthResponse> {
     const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/oauth/callback/${provider}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         code,
-        redirect_uri: AUTH_HUB_CALLBACK_URL,
+        redirect_uri: opts?.redirectUri || AUTH_HUB_CALLBACK_URL,
         account_id: this.user?.id || null,
         context: this.defaultContext,
       }),
@@ -524,7 +531,7 @@ export class WouAuthClient {
   }
 
   // ==========================================
-  // WEB3 AUTHENTICATION (ETHEREUM / SOLANA / ICP)
+  // WEB3 AUTHENTICATION (ETHEREUM / SOLANA)
   // ==========================================
 
   public async loginWithEthereum(): Promise<AuthResponse> {
@@ -613,62 +620,6 @@ export class WouAuthClient {
     this.setSession(data.session_token, data.account);
     this.closeModal();
     return data;
-  }
-
-  public async loginWithInternetIdentity(): Promise<AuthResponse> {
-    const { AuthClient } = await import('@dfinity/auth-client');
-    const authClient = await AuthClient.create({
-      idleOptions: { disableDefaultIdleCallback: true, disableIdle: true },
-    });
-
-    return new Promise((resolve, reject) => {
-      authClient.login({
-        identityProvider: 'https://id.ai/authorize',
-        maxTimeToLive: BigInt(8) * BigInt(3_600_000_000_000), // 8 hours
-        onSuccess: async () => {
-          try {
-            const identity = authClient.getIdentity();
-            const principal = identity.getPrincipal().toText();
-
-            const challengeRes = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/web3/challenge`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ chain: 'icp', public_address: principal }),
-            });
-            const challengeData = await challengeRes.json();
-            if (!challengeRes.ok) throw new Error(challengeData.error || 'Failed to challenge ICP identity.');
-
-            const verifyRes = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/web3/verify`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                chain: 'icp',
-                public_address: principal,
-                signature: 'ICP_DELEGATION_PROVEN',
-                message: challengeData.message,
-                account_id: this.user?.id || null,
-                context: this.defaultContext,
-              }),
-            });
-
-            const data = await verifyRes.json();
-            if (!verifyRes.ok) throw new Error(data.error || 'Internet Identity verification failed.');
-            this.setSession(data.session_token, data.account);
-            this.closeModal();
-            resolve(data);
-          } catch (err: any) {
-            reject(new Error(err.message || 'Error completing Internet Identity login.'));
-          }
-        },
-        onError: (err) => {
-          reject(new Error(err || 'Internet Identity login cancelled or failed.'));
-        },
-      });
-    });
-  }
-
-  public async loginWithIcp(): Promise<AuthResponse> {
-    return this.loginWithInternetIdentity();
   }
 
   // ==========================================
