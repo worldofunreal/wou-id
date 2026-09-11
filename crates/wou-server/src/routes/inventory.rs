@@ -4,6 +4,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use wou_storage::SettleTradeError;
 
 use crate::state::AppState;
 
@@ -39,6 +40,29 @@ pub async fn handle_get_inventory(
     Ok(Json(InventoryResponse { account_id, card_ids: ids }))
 }
 
+// ponytail: static allowlist, replace with a collections registry table when new series ship
+const SOW_CARDS: &[&str] = &[
+    "sow-caesar",
+    "sow-cleopatra",
+    "sow-ragnar",
+    "sow-sun-tzu",
+    "sow-alexander",
+    "sow-genghis-khan",
+    "sow-richard",
+    "sow-vercingetorix",
+    "sow-boudica",
+    "sow-lady-six-sky",
+    "sow-leonidas",
+    "sow-napoleon",
+];
+
+fn is_known_card(id: &str) -> bool {
+    if let Some(num) = id.strip_prefix("genesis-") {
+        return num.len() == 3 && matches!(num.parse::<u16>(), Ok(n) if (1..=300).contains(&n));
+    }
+    SOW_CARDS.contains(&id)
+}
+
 // Authenticated: caller must present valid AuthSession
 pub async fn handle_collect(
     auth: crate::AuthSession,
@@ -49,9 +73,27 @@ pub async fn handle_collect(
     if payload.card_ids.is_empty() || payload.card_ids.len() > 50 {
         return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "card_ids must be 1..50"}))));
     }
+    if let Some(bad) = payload.card_ids.iter().find(|id| !is_known_card(id)) {
+        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("Unknown card {bad}")}))));
+    }
+    // Claim-once: free collectibles mint on demand, so repeats must be
+    // no-ops — otherwise anyone can print unlimited duplicates into trades.
+    let owned = state
+        .storage
+        .get_inventory(&account_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+    let fresh: Vec<String> = payload
+        .card_ids
+        .into_iter()
+        .filter(|id| !owned.iter().any(|o| o == id))
+        .collect();
+    if fresh.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "All requested cards already owned"}))));
+    }
     let ids = state
         .storage
-        .add_to_inventory(&account_id, payload.card_ids)
+        .add_to_inventory(&account_id, fresh)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
     Ok(Json(InventoryResponse { account_id, card_ids: ids }))
@@ -166,16 +208,21 @@ pub async fn handle_trade_accept(
             return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("Offerer no longer owns {}", c)}))));
         }
     }
-    // Atomic swap
-    state.storage.remove_from_inventory(&trade.from_account, trade.offered.clone()).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
-    state.storage.add_to_inventory(&acceptor, trade.offered.clone()).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
-    state.storage.remove_from_inventory(&acceptor, trade.requested.clone()).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
-    state.storage.add_to_inventory(&trade.from_account, trade.requested.clone()).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
-
+    // Atomic settlement: single storage txn re-checks open-status (CAS
+    // against concurrent accepts/cancels) and both-side ownership, then
+    // swaps + flips status in one commit.
     trade.status = "accepted".to_string();
     let bytes = serde_json::to_vec(&trade).unwrap();
-    state.storage.save_trade(&trade.id, &bytes).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
-    Ok(Json(trade))
+    match state
+        .storage
+        .settle_trade(&trade.id, &trade.from_account, &acceptor, &trade.offered, &trade.requested, &bytes)
+        .await
+    {
+        Ok(()) => Ok(Json(trade)),
+        Err(SettleTradeError::NotOpen) => Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Trade not open"})))),
+        Err(SettleTradeError::OwnershipChanged) => Err((StatusCode::CONFLICT, Json(serde_json::json!({"error": "Inventory changed during settlement, retry"})))),
+        Err(SettleTradeError::Db(e)) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))),
+    }
 }
 
 pub async fn handle_trade_cancel(
@@ -189,6 +236,10 @@ pub async fn handle_trade_cancel(
     let mut trade: TradeOffer = serde_json::from_slice(&b).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
     if trade.from_account != caller {
         return Err((StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "Only offerer can cancel"}))));
+    }
+    // CAS: only open trades can be cancelled (never rewrite a settled one)
+    if trade.status != "open" {
+        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Trade not open"}))));
     }
     trade.status = "cancelled".to_string();
     let bytes = serde_json::to_vec(&trade).unwrap();
@@ -207,4 +258,22 @@ pub async fn handle_trade_list(
         }
     }
     Ok(Json(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_known_card() {
+        assert!(is_known_card("genesis-001"));
+        assert!(is_known_card("genesis-300"));
+        assert!(is_known_card("sow-leonidas"));
+        assert!(!is_known_card("genesis-000"));
+        assert!(!is_known_card("genesis-301"));
+        assert!(!is_known_card("genesis-999"));
+        assert!(!is_known_card("foo-123"));
+        assert!(!is_known_card("sow-faker"));
+        assert!(!is_known_card(""));
+    }
 }

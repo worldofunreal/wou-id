@@ -21,6 +21,32 @@ pub struct WouStorage {
     redb: Arc<Database>,
 }
 
+#[derive(Debug)]
+pub enum SettleTradeError {
+    NotOpen,
+    OwnershipChanged,
+    Db(WouError),
+}
+
+fn decode_inv(raw: Option<Vec<u8>>) -> Result<Vec<String>, SettleTradeError> {
+    match raw {
+        Some(b) => serde_json::from_slice(&b)
+            .map_err(|e| SettleTradeError::Db(WouError::DatabaseError(format!("Inventory parse failed: {e}")))),
+        None => Ok(vec![]),
+    }
+}
+
+fn owns_all(inv: &[String], cards: &[String]) -> bool {
+    cards.iter().all(|c| inv.iter().any(|o| o == c))
+}
+
+fn swap_apply(inv: &mut Vec<String>, give: &[String], take: &[String]) {
+    inv.retain(|c| !give.iter().any(|g| g == c));
+    inv.extend(take.iter().cloned());
+    inv.sort();
+    inv.dedup();
+}
+
 impl WouStorage {
     pub fn new(redis_url: &str, redb_path: &str) -> Result<Self, WouError> {
         let redis_client = redis::Client::open(redis_url)
@@ -1022,6 +1048,88 @@ impl WouStorage {
             }
         }
         Ok(out)
+    }
+
+    // Trade settlement — single Redb write txn (atomic).
+    //
+    // Re-checks inside the txn: the trade must still be `open`
+    // (compare-and-set against concurrent accepts/cancels) and both sides
+    // must still own their cards (kills TOCTOU between route checks and
+    // commit). Redb serializes writers, so concurrent settlements queue and
+    // all but the first fail cleanly with NotOpen.
+    pub async fn settle_trade(
+        &self,
+        trade_id: &str,
+        from_account: &str,
+        to_account: &str,
+        offered: &[String],
+        requested: &[String],
+        accepted_trade_json: &[u8],
+    ) -> Result<(), SettleTradeError> {
+        let write_txn = self
+            .redb
+            .begin_write()
+            .map_err(|e| SettleTradeError::Db(WouError::DatabaseError(format!("Redb write txn failed: {e}"))))?;
+        {
+            let mut trades = write_txn
+                .open_table(TRADES_TABLE)
+                .map_err(|e| SettleTradeError::Db(WouError::DatabaseError(format!("Open trades table failed: {e}"))))?;
+            let mut inv = write_txn
+                .open_table(INVENTORY_TABLE)
+                .map_err(|e| SettleTradeError::Db(WouError::DatabaseError(format!("Open inventory table failed: {e}"))))?;
+
+            // CAS: trade must still be open (guard dropped before any write)
+            let is_open = {
+                let cur = trades
+                    .get(trade_id)
+                    .map_err(|e| SettleTradeError::Db(WouError::DatabaseError(format!("Redb trade get failed: {e}"))))?;
+                match cur {
+                    None => false,
+                    Some(g) => {
+                        let v: serde_json::Value =
+                            serde_json::from_slice(g.value()).map_err(|_| SettleTradeError::NotOpen)?;
+                        v.get("status").and_then(|s| s.as_str()) == Some("open")
+                    }
+                }
+            };
+            if !is_open {
+                return Err(SettleTradeError::NotOpen);
+            }
+
+            // Re-verify ownership inside the txn
+            let from_raw = inv
+                .get(from_account)
+                .map_err(|e| SettleTradeError::Db(WouError::DatabaseError(format!("Redb inventory get failed: {e}"))))?
+                .map(|g| g.value().to_vec());
+            let to_raw = inv
+                .get(to_account)
+                .map_err(|e| SettleTradeError::Db(WouError::DatabaseError(format!("Redb inventory get failed: {e}"))))?
+                .map(|g| g.value().to_vec());
+            let mut from_inv = decode_inv(from_raw)?;
+            let mut to_inv = decode_inv(to_raw)?;
+            if !owns_all(&from_inv, offered) || !owns_all(&to_inv, requested) {
+                return Err(SettleTradeError::OwnershipChanged);
+            }
+
+            // Apply swap + persist trade, then commit once
+            swap_apply(&mut from_inv, offered, requested);
+            swap_apply(&mut to_inv, requested, offered);
+            let from_bytes = serde_json::to_vec(&from_inv)
+                .map_err(|e| SettleTradeError::Db(WouError::Internal(format!("Inventory serialize failed: {e}"))))?;
+            let to_bytes = serde_json::to_vec(&to_inv)
+                .map_err(|e| SettleTradeError::Db(WouError::Internal(format!("Inventory serialize failed: {e}"))))?;
+            inv.insert(from_account, from_bytes.as_slice())
+                .map_err(|e| SettleTradeError::Db(WouError::DatabaseError(format!("Insert inventory failed: {e}"))))?;
+            inv.insert(to_account, to_bytes.as_slice())
+                .map_err(|e| SettleTradeError::Db(WouError::DatabaseError(format!("Insert inventory failed: {e}"))))?;
+            trades
+                .insert(trade_id, accepted_trade_json)
+                .map_err(|e| SettleTradeError::Db(WouError::DatabaseError(format!("Insert trade failed: {e}"))))?;
+        }
+        write_txn
+            .commit()
+            .map_err(|e| SettleTradeError::Db(WouError::DatabaseError(format!("Redb commit failed: {e}"))))?;
+        Ok(())
     }
 
     // ==========================================

@@ -1,3 +1,3 @@
 pub mod store;
 
-pub use store::WouStorage;
+pub use store::{SettleTradeError, WouStorage};
