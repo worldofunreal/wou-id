@@ -62,6 +62,12 @@ pub enum WouError {
     #[error("Token exists: {0}")]
     TokenExists(String),
 
+    #[error("Insufficient SPIRAL balance")]
+    InsufficientBalance,
+
+    #[error("Listing not open: {0}")]
+    ListingNotOpen(String),
+
     #[error("Internal server error: {0}")]
     Internal(String),
 }

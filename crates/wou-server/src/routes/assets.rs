@@ -180,3 +180,85 @@ pub async fn handle_asset_events(
 ) -> Result<Json<Vec<wou_core::AssetEvent>>, (StatusCode, Json<serde_json::Value>)> {
     state.storage.asset_events(&id).await.map_err(map_err).map(Json)
 }
+
+#[derive(Deserialize)]
+pub struct FaucetPayload {
+    pub to: String,
+    pub amount: u64,
+}
+
+#[derive(Serialize)]
+pub struct BalanceResponse {
+    pub account: String,
+    pub spiral: u64,
+}
+
+/// Producer-only demo faucet. Real deposits would credit here instead.
+pub async fn handle_faucet(
+    auth: crate::AuthSession,
+    State(state): State<AppState>,
+    Json(payload): Json<FaucetPayload>,
+) -> Result<Json<BalanceResponse>, (StatusCode, Json<serde_json::Value>)> {
+    require_producer(&state, &auth)?;
+    if state.storage.get_account_by_id(&payload.to).await.map_err(map_err)?.is_none() {
+        return Err((StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Recipient not found"}))));
+    }
+    let spiral = state.storage.faucet_spiral(&payload.to, payload.amount).await.map_err(map_err)?;
+    Ok(Json(BalanceResponse { account: payload.to, spiral }))
+}
+
+pub async fn handle_my_balance(
+    auth: crate::AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<BalanceResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let spiral = state.storage.spiral_balance(&auth.account_id).await.map_err(map_err)?;
+    Ok(Json(BalanceResponse { account: auth.account_id, spiral }))
+}
+
+#[derive(Deserialize)]
+pub struct CreateListingPayload {
+    pub asset: String,
+    pub price: u64,
+}
+
+/// Owner lists an Active instance at N SPIRAL. Instance reserves as Listed.
+pub async fn handle_create_listing(
+    auth: crate::AuthSession,
+    State(state): State<AppState>,
+    Json(payload): Json<CreateListingPayload>,
+) -> Result<Json<wou_core::Listing>, (StatusCode, Json<serde_json::Value>)> {
+    state
+        .storage
+        .create_listing(&payload.asset, &auth.account_id, payload.price)
+        .await
+        .map_err(map_err)
+        .map(Json)
+}
+
+pub async fn handle_list_listings(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<wou_core::Listing>>, (StatusCode, Json<serde_json::Value>)> {
+    state.storage.list_open_listings(50).await.map_err(map_err).map(Json)
+}
+
+pub async fn handle_cancel_listing(
+    auth: crate::AuthSession,
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<Json<wou_core::Listing>, (StatusCode, Json<serde_json::Value>)> {
+    state.storage.cancel_listing(&id, &auth.account_id).await.map_err(map_err).map(Json)
+}
+
+/// Atomic buy: SPIRAL + instance swap in one commit. Fails closed on
+/// insufficient balance or concurrent sale.
+pub async fn handle_buy_listing(
+    auth: crate::AuthSession,
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<Json<wou_core::Listing>, (StatusCode, Json<serde_json::Value>)> {
+    match state.storage.buy_listing(&id, &auth.account_id).await {
+        Ok(l) => Ok(Json(l)),
+        Err(WouError::InsufficientBalance) => Err((StatusCode::PAYMENT_REQUIRED, Json(serde_json::json!({"error": "Insufficient SPIRAL balance"})))),
+        Err(e) => Err(map_err(e)),
+    }
+}

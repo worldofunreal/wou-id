@@ -118,6 +118,48 @@ async fn transfer_freeze_restore_with_events() {
 }
 
 #[tokio::test]
+async fn marketplace_faucet_list_buy() {
+    let (storage, _dir) = test_storage("assets_market.redb");
+    seed(&storage).await;
+    assert_eq!(storage.faucet_spiral("alice", 100).await.unwrap(), 100);
+    assert_eq!(storage.faucet_spiral("bob", 30).await.unwrap(), 30);
+    assert_eq!(storage.spiral_balance("carol").await.unwrap(), 0);
+    storage.claim_token("genesis-001", "alice", "alice").await.unwrap();
+    // non-owner cannot list
+    assert!(storage.create_listing("genesis-001#1", "mallory", 50).await.is_err());
+    let l = storage.create_listing("genesis-001#1", "alice", 50).await.unwrap();
+    assert_eq!(l.status, "open");
+    // listed instance refuses direct moves
+    assert!(storage.transfer_asset("genesis-001#1", "alice", "bob", "alice").await.is_err());
+    // poor buyer fails, nothing moves
+    assert!(storage.buy_listing(&l.id, "bob").await.is_err());
+    assert_eq!(storage.spiral_balance("bob").await.unwrap(), 30);
+    // fund + buy
+    storage.faucet_spiral("bob", 30).await.unwrap();
+    let sold = storage.buy_listing(&l.id, "bob").await.unwrap();
+    assert_eq!(sold.status, "sold");
+    assert_eq!(storage.get_asset("genesis-001#1").await.unwrap().unwrap().owner, "bob");
+    assert_eq!(storage.spiral_balance("bob").await.unwrap(), 10);
+    assert_eq!(storage.spiral_balance("alice").await.unwrap(), 150);
+    // second buy fails closed
+    assert!(storage.buy_listing(&l.id, "alice").await.is_err());
+}
+
+#[tokio::test]
+async fn marketplace_cancel_unlists() {
+    let (storage, _dir) = test_storage("assets_cancel.redb");
+    seed(&storage).await;
+    storage.claim_token("genesis-001", "alice", "alice").await.unwrap();
+    let l = storage.create_listing("genesis-001#1", "alice", 50).await.unwrap();
+    assert!(storage.cancel_listing(&l.id, "mallory").await.is_err());
+    let c = storage.cancel_listing(&l.id, "alice").await.unwrap();
+    assert_eq!(c.status, "cancelled");
+    // movable again
+    assert!(storage.transfer_asset("genesis-001#1", "alice", "bob", "alice").await.is_ok());
+    assert!(storage.list_open_listings(50).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn swap_instance_lists_moves_many_atomically() {
     let (storage, _dir) = test_storage("assets_swaplist.redb");
     seed(&storage).await;
