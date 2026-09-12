@@ -106,6 +106,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Initialize Storage, Stalwart Mailer, and OAuth Manager
     let storage = WouStorage::new(&redis_url, &redb_path)?;
+    // Vault rotation (testing stage): re-derive every stored wallet with the
+    // current seed. Idempotent; never fails boot (logs and continues).
+    match storage
+        .migrate_vault_addresses(|id| wou_crypto::web3::derive_embedded_wallets(id, &vault_seed))
+        .await
+    {
+        Ok((total, changed)) => info!("vault migration: {changed}/{total} accounts re-derived"),
+        Err(e) => tracing::warn!("vault migration skipped (data untouched): {e}"),
+    }
     let mailer_config = StalwartMailerConfig {
         smtp_host,
         smtp_port,

@@ -2158,6 +2158,45 @@ impl WouStorage {
     // PLAYER DISCOVERY & SEARCH
     // ==========================================
 
+    /// One-shot vault rotation: re-derive embedded wallets for EVERY account
+    /// with the current seed and overwrite. Idempotent (no-op when derived ==
+    /// stored). Testing-stage tool: old addresses are abandoned, never merged.
+    pub async fn migrate_vault_addresses<F>(&self, derive: F) -> Result<(usize, usize), WouError>
+    where
+        F: Fn(&str) -> wou_core::EmbeddedWallets,
+    {
+        let read_txn = self
+            .redb
+            .begin_read()
+            .map_err(|e| WouError::DatabaseError(format!("Redb read txn failed: {e}")))?;
+        let table = read_txn
+            .open_table(PLAYERS_TABLE)
+            .map_err(|e| WouError::DatabaseError(format!("Open players table failed: {e}")))?;
+
+        let mut stale = Vec::new();
+        let mut total = 0usize;
+        for item in table.iter().map_err(|e| WouError::DatabaseError(format!("Iter failed: {e}")))? {
+            let (_, v) = item.map_err(|e| WouError::DatabaseError(format!("Entry failed: {e}")))?;
+            if let Ok(mut account) = serde_json::from_slice::<PlayerAccount>(v.value()) {
+                total += 1;
+                let fresh = derive(&account.id);
+                if account.embedded_wallets != fresh {
+                    account.embedded_wallets = fresh;
+                    account.updated_at = chrono::Utc::now().timestamp() as u64;
+                    stale.push(account);
+                }
+            }
+        }
+        drop(table);
+        drop(read_txn);
+
+        let changed = stale.len();
+        for account in &stale {
+            self.save_account(account).await?;
+        }
+        Ok((total, changed))
+    }
+
     pub async fn search_players(&self, query: &str, limit: usize) -> Result<Vec<PlayerSearchResult>, WouError> {
         let clean = query.trim().trim_start_matches('@').to_lowercase();
         if clean.is_empty() {
