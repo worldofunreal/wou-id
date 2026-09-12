@@ -408,6 +408,54 @@ pub struct SessionClaims {
     pub iat: u64,
     /// Expiration timestamp.
     pub exp: u64,
+    /// Unique token ID (revocation blocklist; empty = legacy pre-jti token).
+    #[serde(default)]
+    pub jti: String,
+}
+
+/// Session lifetime: 24h sliding (refresh re-issues while the old token verifies).
+pub const SESSION_TTL_SECONDS: u64 = 86400;
+
+/// Public card: the ONLY account shape ever returned without auth.
+/// No email, no wallets, no linked identities, no internal flags.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PublicProfile {
+    pub id: String,
+    pub username: String,
+    pub display_name: String,
+    pub avatar_url: Option<String>,
+    pub banner_url: Option<String>,
+    pub bio: Option<String>,
+    pub country: Option<String>,
+    pub is_verified: bool,
+    pub followers_count: u32,
+    pub following_count: u32,
+    pub clan_tag: Option<String>,
+    pub clan_name: Option<String>,
+    pub game_stats: CrossGameProfile,
+    /// Public profile metadata (avatar/banner/bio/country/verified/attributes).
+    pub profile: UserProfile,
+}
+
+impl From<&PlayerAccount> for PublicProfile {
+    fn from(a: &PlayerAccount) -> Self {
+        Self {
+            id: a.id.clone(),
+            username: a.username.clone(),
+            display_name: a.display_name.clone(),
+            avatar_url: a.profile.avatar_url.clone(),
+            banner_url: a.profile.banner_url.clone(),
+            bio: a.profile.bio.clone(),
+            country: a.profile.country.clone(),
+            is_verified: a.profile.is_verified,
+            followers_count: a.followers_count,
+            following_count: a.following_count,
+            clan_tag: a.clan_tag.clone(),
+            clan_name: a.clan_name.clone(),
+            game_stats: a.game_stats.clone(),
+            profile: a.profile.clone(),
+        }
+    }
 }
 
 /// OTP State record stored in Valkey/Redis during verification window.
@@ -542,6 +590,8 @@ pub struct Collection {
 pub enum AssetStatus {
     #[default]
     Active,
+    /// Reserved by an open price listing: frozen for transfers/trades/swap.
+    Listed,
     Frozen,
 }
 
@@ -573,6 +623,19 @@ pub struct AssetEvent {
     pub by: String,
     #[serde(default)]
     pub at: u64,
+}
+
+/// Price listing: an instance reserved for sale at N SPIRAL (whole units).
+/// The instance flips to Listed while open, so it cannot move elsewhere.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Listing {
+    pub id: String,
+    pub asset: String,
+    pub seller: String,
+    pub price: u64,
+    pub status: String, // open | sold | cancelled
+    #[serde(default)]
+    pub created_at: u64,
 }
 
 #[cfg(test)]
@@ -613,6 +676,40 @@ mod tests {
         assert_eq!(account.followers_count, 0);
         assert_eq!(account.following_count, 0);
         assert_eq!(account.embedded_wallets.evm_address, "");
+    }
+
+    #[test]
+    fn test_public_profile_leaks_nothing_sensitive() {
+        let mut account = PlayerAccount::new_with_wallets(
+            "some-uuid".to_string(),
+            Some("raven379".to_string()),
+            Some("Raven".to_string()),
+            EmbeddedWallets {
+                evm_address: "0xabc".to_string(),
+                solana_address: "So1ana".to_string(),
+                icp_principal: "abc-cai".to_string(),
+                bitcoin_address: "bc1qxyz".to_string(),
+            },
+        );
+        account.email = Some("victim@example.com".to_string());
+        account.link_identity(AuthProvider::Google, "112522765899615009583".to_string());
+        let json = serde_json::to_value(PublicProfile::from(&account)).unwrap();
+        let s = serde_json::to_string(&json).unwrap();
+        for forbidden in ["victim@example.com", "0xabc", "So1ana", "112522765899615009583", "email", "embedded_wallets", "linked_identities", "newsletter", "welcome"] {
+            assert!(!s.contains(forbidden), "public card leaks {forbidden}");
+        }
+        assert_eq!(json["username"], "raven379");
+    }
+
+    #[test]
+    fn test_legacy_session_claims_default_empty_jti() {
+        // Pre-jti tokens (issued before revocation) must still decode.
+        let legacy = serde_json::json!({
+            "sub": "x", "name": "y", "email": null,
+            "context": "world_of_unreal", "iat": 1, "exp": 9999999999u64
+        });
+        let claims: SessionClaims = serde_json::from_value(legacy).unwrap();
+        assert_eq!(claims.jti, "");
     }
 
     #[test]

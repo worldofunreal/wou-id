@@ -90,7 +90,14 @@ pub async fn handle_unfollow_user(
 pub async fn handle_get_social_graph(
     Path(account_id): Path<String>,
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<SocialCountsResponse>, (StatusCode, Json<serde_json::Value>)> {
+    if let Err(e) = state.storage.tally_ip(&crate::routes::guard::client_ip(&headers)).await {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ));
+    }
     let followers = state.storage.get_followers(&account_id).await.unwrap_or_default();
     let following = state.storage.get_following(&account_id).await.unwrap_or_default();
 
@@ -104,7 +111,14 @@ pub async fn handle_get_social_graph(
 pub async fn handle_get_global_feed(
     Query(query): Query<FeedQuery>,
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<Vec<SocialActivity>>, (StatusCode, Json<serde_json::Value>)> {
+    if let Err(e) = state.storage.tally_ip(&crate::routes::guard::client_ip(&headers)).await {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ));
+    }
     let feed = state
         .storage
         .get_social_feed(query.limit)

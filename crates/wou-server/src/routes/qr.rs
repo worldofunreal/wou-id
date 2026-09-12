@@ -5,7 +5,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use wou_core::{GameContext, QrChallenge};
+use wou_core::{GameContext, QrChallenge, SESSION_TTL_SECONDS};
 
 use crate::state::AppState;
 
@@ -260,7 +260,7 @@ pub async fn handle_qr_approve(
             &account.display_name,
             account.email.clone(),
             ch.context,
-            86400 * 30,
+            SESSION_TTL_SECONDS,
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
 

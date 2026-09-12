@@ -1,11 +1,12 @@
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     Json,
 };
 use serde::{Deserialize, Serialize};
-use wou_core::PlayerAccount;
+use wou_core::{PlayerAccount, PublicProfile};
 
+use crate::routes::guard::{client_ip, verified_owner};
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -30,12 +31,33 @@ pub struct CheckUsernameResponse {
     pub available: bool,
 }
 
+/// Throttle unauthenticated enumeration oracles (NAT-friendly IP ceilings,
+/// same intake policy as anonymous/OTP). Over-limit = 429, never a data leak.
+async fn gate_oracle(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if let Err(e) = state.storage.tally_ip(&client_ip(headers)).await {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn handle_get_profile(
     Path(account_id): Path<String>,
     State(state): State<AppState>,
-) -> Result<Json<PlayerAccount>, (StatusCode, Json<serde_json::Value>)> {
+    headers: HeaderMap,
+) -> Result<Json<PublicProfile>, (StatusCode, Json<serde_json::Value>)> {
+    // Owner (valid session for this id) skips the throttle; everyone else is
+    // gated. Response is always the public card (owners use /me for full data).
+    if !verified_owner(&headers, &state, &account_id).await {
+        gate_oracle(&state, &headers).await?;
+    }
     match state.storage.get_account_by_id(&account_id).await {
-        Ok(Some(account)) => Ok(Json(account)),
+        Ok(Some(account)) => Ok(Json(PublicProfile::from(&account))),
         Ok(None) => Err((StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Account not found"})))),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))),
     }
@@ -44,9 +66,11 @@ pub async fn handle_get_profile(
 pub async fn handle_get_by_username(
     Path(username): Path<String>,
     State(state): State<AppState>,
-) -> Result<Json<PlayerAccount>, (StatusCode, Json<serde_json::Value>)> {
+    headers: HeaderMap,
+) -> Result<Json<PublicProfile>, (StatusCode, Json<serde_json::Value>)> {
+    gate_oracle(&state, &headers).await?;
     match state.storage.find_account_by_username(&username).await {
-        Ok(Some(account)) => Ok(Json(account)),
+        Ok(Some(account)) => Ok(Json(PublicProfile::from(&account))),
         Ok(None) => Err((StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Player handle not found"})))),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))),
     }
@@ -56,7 +80,9 @@ pub async fn handle_check_username(
     Path(username): Path<String>,
     Query(query): Query<CheckUsernameQuery>,
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<Json<CheckUsernameResponse>, (StatusCode, Json<serde_json::Value>)> {
+    gate_oracle(&state, &headers).await?;
     let current_id = query.current_id.unwrap_or_default();
     let available = state
         .storage
@@ -164,7 +190,9 @@ fn default_search_limit() -> usize {
 pub async fn handle_search_players(
     Query(query): Query<SearchPlayersQuery>,
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<wou_core::PlayerSearchResult>>, (StatusCode, Json<serde_json::Value>)> {
+    gate_oracle(&state, &headers).await?;
     let results = state
         .storage
         .search_players(&query.q, query.limit.min(50))

@@ -136,6 +136,23 @@ export interface ClanDetails {
   }>;
 }
 
+export interface PublicProfile {
+  id: string;
+  username: string;
+  display_name: string;
+  avatar_url?: string;
+  banner_url?: string;
+  bio?: string;
+  country?: string;
+  is_verified?: boolean;
+  followers_count: number;
+  following_count: number;
+  clan_tag?: string;
+  clan_name?: string;
+  game_stats: CrossGameProfile;
+  profile?: UserProfile;
+}
+
 export interface AuthResponse {
   status: string;
   account: PlayerAccount;
@@ -155,28 +172,65 @@ export class WouAuthClient {
     }
   }
 
+  /**
+   * Ownership proof for link/merge calls (guest -> verified upgrade).
+   * The server only merges into the supplied account_id when this Bearer
+   * matches it; without it the server mints a fresh account (safe default).
+   */
+  private authHeaders(): Record<string, string> {
+    const h: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (this.sessionToken) h['Authorization'] = `Bearer ${this.sessionToken}`;
+    return h;
+  }
+
+  /**
+   * Persisted shape: token + public card ONLY (no email, no wallets,
+   * no linked identities). Full account is refreshed via getMe().
+   */
+  private static toPublicCard(account: PlayerAccount): PlayerAccount {
+    return {
+      ...account,
+      email: undefined,
+      newsletter_opt_in: false,
+      embedded_wallets: { evm_address: '', solana_address: '', icp_principal: '', bitcoin_address: '' },
+      linked_identities: [],
+    } as PlayerAccount;
+  }
+
   /** Override the context sent with OTP/QR/OAuth calls (one line per site entry). */
   public setDefaultContext(ctx: GameContext): void {
     this.defaultContext = ctx;
   }
 
   public initSession(): PlayerAccount | null {
-    // 1. Check if returning from cross-domain SSO Hub with token in URL
+    // 1. Check if returning from cross-domain SSO Hub with token.
+    // Query (legacy) or fragment (current: fragments never reach server logs).
     const urlParams = new URLSearchParams(window.location.search);
-    const tokenFromUrl = urlParams.get('session_token');
-    const accParam = urlParams.get('account');
+    let tokenFromUrl = urlParams.get('session_token');
+    let accParam = urlParams.get('account');
+    let fromFragment = false;
+    if (!tokenFromUrl && window.location.hash.length > 1) {
+      const fragParams = new URLSearchParams(window.location.hash.slice(1));
+      tokenFromUrl = fragParams.get('session_token');
+      accParam = fragParams.get('account');
+      fromFragment = !!tokenFromUrl;
+    }
 
     if (tokenFromUrl && accParam) {
       try {
         const account = JSON.parse(decodeURIComponent(accParam)) as PlayerAccount;
         this.setSession(tokenFromUrl, account);
 
-        // Clean query parameters from address bar cleanly without page refresh
-        urlParams.delete('session_token');
-        urlParams.delete('account');
-        const cleanSearch = urlParams.toString();
-        const newUrl = window.location.pathname + (cleanSearch ? `?${cleanSearch}` : '') + window.location.hash;
-        window.history.replaceState({}, document.title, newUrl);
+        // Clean handoff material from the address bar without page refresh.
+        if (fromFragment) {
+          window.history.replaceState({}, document.title, window.location.pathname + window.location.search);
+        } else {
+          urlParams.delete('session_token');
+          urlParams.delete('account');
+          const cleanSearch = urlParams.toString();
+          const newUrl = window.location.pathname + (cleanSearch ? `?${cleanSearch}` : '') + window.location.hash;
+          window.history.replaceState({}, document.title, newUrl);
+        }
         return this.user;
       } catch (err) {
         console.error('Failed to parse returning SSO account payload:', err);
@@ -210,7 +264,7 @@ export class WouAuthClient {
     this.user = account;
     if (typeof window !== 'undefined') {
       localStorage.setItem('wou_session_token', token);
-      localStorage.setItem('wou_user_data', JSON.stringify(account));
+      localStorage.setItem('wou_user_data', JSON.stringify(WouAuthClient.toPublicCard(account)));
       window.dispatchEvent(
         new CustomEvent('wou:auth-state-change', {
           detail: { authenticated: true, isAuthenticated: true, user: account, token },
@@ -220,6 +274,15 @@ export class WouAuthClient {
   }
 
   public logout(): void {
+    // Revoke server-side first (fire-and-forget): stamps this token's jti so
+    // the extractor rejects it everywhere. Local wipe happens regardless.
+    if (this.sessionToken) {
+      const token = this.sessionToken;
+      fetchImpl(`${ID_SERVER_URL}/api/v1/auth/logout`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      }).catch(() => {});
+    }
     this.sessionToken = null;
     this.user = null;
     if (typeof window !== 'undefined') {
@@ -446,7 +509,7 @@ export class WouAuthClient {
   public async verifyOtp(email: string, code: string, context?: GameContext | boolean): Promise<AuthResponse> {
     const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/otp/verify`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this.authHeaders(),
       body: JSON.stringify({
         email,
         code,
@@ -512,7 +575,7 @@ export class WouAuthClient {
   public async handleOAuthCallback(provider: string, code: string): Promise<AuthResponse> {
     const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/oauth/callback/${provider}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this.authHeaders(),
       body: JSON.stringify({
         code,
         redirect_uri: AUTH_HUB_CALLBACK_URL,
@@ -554,7 +617,7 @@ export class WouAuthClient {
 
     const verifyRes = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/web3/verify`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this.authHeaders(),
       body: JSON.stringify({
         chain: 'ethereum',
         public_address: publicAddress,
@@ -602,7 +665,7 @@ export class WouAuthClient {
 
     const verifyRes = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/web3/verify`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this.authHeaders(),
       body: JSON.stringify({
         chain: 'solana',
         public_address: publicAddress,
@@ -645,7 +708,7 @@ export class WouAuthClient {
 
             const verifyRes = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/web3/verify`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: this.authHeaders(),
               body: JSON.stringify({
                 chain: 'icp',
                 public_address: principal,
@@ -707,7 +770,7 @@ export class WouAuthClient {
 
     const verifyRes = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/web3/verify`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this.authHeaders(),
       body: JSON.stringify({
         chain: 'passkey',
         public_address: credential.id,
@@ -852,13 +915,14 @@ export class WouAuthClient {
     if (!res.ok) throw new Error(data.error || 'Failed to unfollow.');
   }
 
-  public async getUserByUsername(username: string): Promise<PlayerAccount | null> {
+  /** Public card only (no email, no wallets, no identities) — server-enforced. */
+  public async getUserByUsername(username: string): Promise<PublicProfile | null> {
     const clean = username.trim().replace(/^@/, '');
     if (!clean) return null;
     try {
       const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/user/by-username/${encodeURIComponent(clean)}`);
       if (!res.ok) return null;
-      return (await res.json()) as PlayerAccount;
+      return (await res.json()) as PublicProfile;
     } catch {
       return null;
     }

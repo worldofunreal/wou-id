@@ -77,6 +77,24 @@ pub async fn handle_upload_media(
         )
     })?;
 
+    // Magic-byte check: the extension is client-claimed, the bytes are truth.
+    // Rejects HTML/SVG polyglots served back from /uploads (XSS via stored file).
+    let looks_like = |sig: &[u8]| bytes.len() >= sig.len() && &bytes[..sig.len()] == sig;
+    let valid_image = match file_ext.as_str() {
+        "png" => looks_like(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]),
+        "jpg" => looks_like(&[0xFF, 0xD8, 0xFF]),
+        _ => {
+            file_ext = "webp".into();
+            looks_like(b"RIFF") && bytes.len() >= 12 && &bytes[8..12] == b"WEBP"
+        }
+    };
+    if !valid_image {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "File bytes do not match the claimed image type"})),
+        ));
+    }
+
     let upload_dir = std::env::var("WOU_UPLOAD_DIR").unwrap_or_else(|_| "/var/db/wou-id/uploads".into());
     if let Err(e) = tokio::fs::create_dir_all(&upload_dir).await {
         error!("Failed to create upload directory {}: {}", upload_dir, e);

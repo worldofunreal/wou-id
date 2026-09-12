@@ -60,6 +60,25 @@ where
 
         let account_id = claims.sub.clone();
 
+        // Revocation: logout stamps the token jti into Valkey (TTL = remaining life).
+        // Legacy pre-jti tokens (empty jti) skip the check; they age out in ≤24h.
+        // Storage errors fail open (short TTL bounds the window) but are logged.
+        if !claims.jti.is_empty() {
+            let key = format!("wou_jwt_revoked:{}", claims.jti);
+            match app_state.storage.get_cache_string(&key).await {
+                Ok(Some(_)) => {
+                    return Err((
+                        StatusCode::UNAUTHORIZED,
+                        Json(json!({ "error": "Session revoked (logout)" })),
+                    ))
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!("revocation check failed (fail-open): {e}");
+                }
+            }
+        }
+
         Ok(AuthSession { account_id, claims })
     }
 }
@@ -103,6 +122,7 @@ mod tests {
             otp_expiry_seconds: 600,
             admin_alert_email: None,
             producer_ids: vec![],
+            vault_seed: "test-only-dummy-vector-not-a-real-secret".to_string(),
         };
 
         // 1. Missing header

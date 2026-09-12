@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use wou_core::{AuthProvider, GameContext};
+use wou_core::{AuthProvider, GameContext, SESSION_TTL_SECONDS};
 
 use crate::state::AppState;
 
@@ -179,7 +179,7 @@ async fn approve_challenge_inner(
         .ok_or_else(|| err("Account not found"))?;
     let token = state
         .jwt
-        .issue_token(&account.id, &account.display_name, account.email.clone(), context, 86400 * 30)
+        .issue_token(&account.id, &account.display_name, account.email.clone(), context, SESSION_TTL_SECONDS)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
     ch.approved_account_id = Some(account.id);
     ch.session_token = Some(token);
