@@ -3,7 +3,7 @@ use redis::AsyncCommands;
 use sha2::Digest;
 use std::sync::Arc;
 use tracing::info;
-use wou_core::{canonical_email, key_tag, AssetEvent, AssetInstance, AssetStatus, AuthProvider, Clan, ClanMember, Collection, PendingOtp, PlayerAccount, PlayerSearchResult, TokenMetadata, TokenType, WouError};
+use wou_core::{canonical_email, key_tag, AssetEvent, AssetInstance, AssetStatus, AuthProvider, Clan, ClanMember, Collection, Listing, PendingOtp, PlayerAccount, PlayerSearchResult, TokenMetadata, TokenType, WouError};
 
 const PLAYERS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_players");
 const IDENTITY_INDEX_TABLE: TableDefinition<&str, &str> = TableDefinition::new("wou_identity_index");
@@ -19,6 +19,8 @@ const ASSET_COLLECTIONS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::n
 const ASSET_TOKENS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_asset_tokens");
 const ASSET_INSTANCES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_asset_instances");
 const ASSET_EVENTS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_asset_events");
+const SPIRAL_BALANCES_TABLE: TableDefinition<&str, u64> = TableDefinition::new("wou_spiral_balances");
+const ASSET_LISTINGS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_asset_listings");
 
 #[derive(Clone)]
 pub struct WouStorage {
@@ -84,6 +86,8 @@ impl WouStorage {
             let _ = write_txn.open_table(ASSET_TOKENS_TABLE);
             let _ = write_txn.open_table(ASSET_INSTANCES_TABLE);
             let _ = write_txn.open_table(ASSET_EVENTS_TABLE);
+            let _ = write_txn.open_table(SPIRAL_BALANCES_TABLE);
+            let _ = write_txn.open_table(ASSET_LISTINGS_TABLE);
         }
         write_txn
             .commit()
@@ -1449,6 +1453,7 @@ impl WouStorage {
         let kind = match status {
             AssetStatus::Frozen => "freeze",
             AssetStatus::Active => "restore",
+            AssetStatus::Listed => "list",
         };
         let write_txn = self
             .redb
@@ -1467,6 +1472,9 @@ impl WouStorage {
             };
             let mut a: AssetInstance = serde_json::from_slice(&b)
                 .map_err(|e| WouError::Internal(format!("Asset parse failed: {e}")))?;
+            if a.status == AssetStatus::Listed {
+                return Err(WouError::Internal("Asset is listed; cancel the listing first".into()));
+            }
             a.status = status;
             table
                 .insert(id, serde_json::to_vec(&a).unwrap().as_slice())
@@ -1606,8 +1614,7 @@ impl WouStorage {
         Ok(())
     }
 
-    pub async fn asset_events(&self, asset: &str) -> Result<Vec<AssetEvent>, WouError> {
-        let read_txn = self
+    pub async fn asset_events(&self, asset: &str) -> Result<Vec<AssetEvent>, WouError> {        let read_txn = self
             .redb
             .begin_read()
             .map_err(|e| WouError::DatabaseError(format!("Redb read txn failed: {e}")))?;
@@ -1625,6 +1632,287 @@ impl WouStorage {
         }
         out.sort_by(|a, b| a.at.cmp(&b.at));
         Ok(out)
+    }
+
+    // ==========================================
+    // SPIRAL — custodial fungible balance (whole units, demo faucet)
+    // ==========================================
+
+    pub async fn spiral_balance(&self, account: &str) -> Result<u64, WouError> {
+        let read_txn = self
+            .redb
+            .begin_read()
+            .map_err(|e| WouError::DatabaseError(format!("Redb read txn failed: {e}")))?;
+        let table = read_txn
+            .open_table(SPIRAL_BALANCES_TABLE)
+            .map_err(|e| WouError::DatabaseError(format!("Open balances table failed: {e}")))?;
+        match table.get(account) {
+            Ok(Some(v)) => Ok(v.value()),
+            Ok(None) => Ok(0),
+            Err(e) => Err(WouError::DatabaseError(format!("Redb balance get failed: {e}"))),
+        }
+    }
+
+    /// Producer faucet: credit demo funds. Route-gated, never open.
+    pub async fn faucet_spiral(&self, to: &str, amount: u64) -> Result<u64, WouError> {
+        if amount == 0 || amount > 1_000_000 {
+            return Err(WouError::Internal("amount must be 1..1000000".into()));
+        }
+        let write_txn = self
+            .redb
+            .begin_write()
+            .map_err(|e| WouError::DatabaseError(format!("Redb write txn failed: {e}")))?;
+        let next = {
+            let mut table = write_txn
+                .open_table(SPIRAL_BALANCES_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open balances table failed: {e}")))?;
+            let cur: u64 = table
+                .get(to)
+                .map_err(|e| WouError::DatabaseError(format!("Redb balance get failed: {e}")))?
+                .map(|g| g.value())
+                .unwrap_or(0);
+            let next = cur.saturating_add(amount);
+            table
+                .insert(to, next)
+                .map_err(|e| WouError::DatabaseError(format!("Insert balance failed: {e}")))?;
+            next
+        };
+        write_txn
+            .commit()
+            .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
+        Ok(next)
+    }
+
+    // ==========================================
+    // LISTINGS — fixed-price sale with reservation + atomic buy
+    // ==========================================
+
+    /// Reserve an owned Active instance for sale. Instance flips to Listed
+    /// so transfers, trades and swaps refuse it until sold or cancelled.
+    pub async fn create_listing(&self, asset_id: &str, seller: &str, price: u64) -> Result<Listing, WouError> {
+        if price == 0 {
+            return Err(WouError::Internal("price must be > 0".into()));
+        }
+        let write_txn = self
+            .redb
+            .begin_write()
+            .map_err(|e| WouError::DatabaseError(format!("Redb write txn failed: {e}")))?;
+        let listing = {
+            let mut inst_table = write_txn
+                .open_table(ASSET_INSTANCES_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open asset table failed: {e}")))?;
+            let raw = inst_table
+                .get(asset_id)
+                .map_err(|e| WouError::DatabaseError(format!("Redb asset get failed: {e}")))?
+                .map(|g| g.value().to_vec());
+            let Some(b) = raw else {
+                return Err(WouError::AssetNotFound(asset_id.to_string()));
+            };
+            let mut a: AssetInstance = serde_json::from_slice(&b)
+                .map_err(|e| WouError::Internal(format!("Asset parse failed: {e}")))?;
+            if a.owner != seller {
+                return Err(WouError::NotAssetOwner);
+            }
+            if a.status != AssetStatus::Active {
+                return Err(WouError::AssetFrozen(asset_id.to_string()));
+            }
+            a.status = AssetStatus::Listed;
+            inst_table
+                .insert(asset_id, serde_json::to_vec(&a).unwrap().as_slice())
+                .map_err(|e| WouError::DatabaseError(format!("Insert asset failed: {e}")))?;
+            let listing = Listing {
+                id: uuid::Uuid::new_v4().to_string(),
+                asset: asset_id.to_string(),
+                seller: seller.to_string(),
+                price,
+                status: "open".to_string(),
+                created_at: chrono::Utc::now().timestamp() as u64,
+            };
+            Self::put_json(
+                &write_txn,
+                ASSET_LISTINGS_TABLE,
+                &listing.id,
+                &serde_json::to_vec(&listing).unwrap(),
+            )?;
+            Self::log_event_in(&write_txn, &Self::new_event(asset_id, "list", Some(seller.to_string()), None, seller))?;
+            listing
+        };
+        write_txn
+            .commit()
+            .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
+        Ok(listing)
+    }
+
+    pub async fn get_listing(&self, id: &str) -> Result<Option<Listing>, WouError> {
+        let read_txn = self
+            .redb
+            .begin_read()
+            .map_err(|e| WouError::DatabaseError(format!("Redb read txn failed: {e}")))?;
+        match Self::get_json(&read_txn, ASSET_LISTINGS_TABLE, id)? {
+            Some(b) => Ok(Some(
+                serde_json::from_slice(&b).map_err(|e| WouError::Internal(format!("Listing parse failed: {e}")))?,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    pub async fn list_open_listings(&self, limit: usize) -> Result<Vec<Listing>, WouError> {
+        let read_txn = self
+            .redb
+            .begin_read()
+            .map_err(|e| WouError::DatabaseError(format!("Redb read txn failed: {e}")))?;
+        let table = read_txn
+            .open_table(ASSET_LISTINGS_TABLE)
+            .map_err(|e| WouError::DatabaseError(format!("Open asset table failed: {e}")))?;
+        let mut out = Vec::new();
+        for item in table.iter().map_err(|e| WouError::DatabaseError(e.to_string()))? {
+            let (_, v) = item.map_err(|e| WouError::DatabaseError(e.to_string()))?;
+            if let Ok(l) = serde_json::from_slice::<Listing>(v.value()) {
+                if l.status == "open" {
+                    out.push(l);
+                    if out.len() >= limit {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Seller-only cancel: listing closes, instance back to Active.
+    pub async fn cancel_listing(&self, id: &str, caller: &str) -> Result<Listing, WouError> {
+        let write_txn = self
+            .redb
+            .begin_write()
+            .map_err(|e| WouError::DatabaseError(format!("Redb write txn failed: {e}")))?;
+        let listing = {
+            let mut list_table = write_txn
+                .open_table(ASSET_LISTINGS_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open asset table failed: {e}")))?;
+            let raw = list_table
+                .get(id)
+                .map_err(|e| WouError::DatabaseError(format!("Redb listing get failed: {e}")))?
+                .map(|g| g.value().to_vec());
+            let Some(b) = raw else {
+                return Err(WouError::ListingNotOpen(id.to_string()));
+            };
+            let mut l: Listing = serde_json::from_slice(&b)
+                .map_err(|e| WouError::Internal(format!("Listing parse failed: {e}")))?;
+            if l.seller != caller {
+                return Err(WouError::NotAssetOwner);
+            }
+            if l.status != "open" {
+                return Err(WouError::ListingNotOpen(id.to_string()));
+            }
+            l.status = "cancelled".to_string();
+            list_table
+                .insert(id, serde_json::to_vec(&l).unwrap().as_slice())
+                .map_err(|e| WouError::DatabaseError(format!("Insert listing failed: {e}")))?;
+            let mut inst_table = write_txn
+                .open_table(ASSET_INSTANCES_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open asset table failed: {e}")))?;
+            let listed_raw: Option<Vec<u8>> = inst_table
+                .get(l.asset.as_str())
+                .map_err(|e| WouError::DatabaseError(format!("Redb asset get failed: {e}")))?
+                .map(|g| g.value().to_vec());
+            if let Some(ab) = listed_raw {
+                let mut a: AssetInstance = serde_json::from_slice(&ab)
+                    .map_err(|e| WouError::Internal(format!("Asset parse failed: {e}")))?;
+                if a.status == AssetStatus::Listed {
+                    a.status = AssetStatus::Active;
+                    inst_table
+                        .insert(l.asset.as_str(), serde_json::to_vec(&a).unwrap().as_slice())
+                        .map_err(|e| WouError::DatabaseError(format!("Insert asset failed: {e}")))?;
+                }
+            }
+            Self::log_event_in(&write_txn, &Self::new_event(&l.asset, "unlist", Some(caller.to_string()), None, caller))?;
+            l
+        };
+        write_txn
+            .commit()
+            .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
+        Ok(listing)
+    }
+
+    /// Atomic buy: SPIRAL buyer→seller + instance seller→buyer + listing sold,
+    /// one commit. Concurrent buys fail closed on the second (balance moved).
+    pub async fn buy_listing(&self, id: &str, buyer: &str) -> Result<Listing, WouError> {
+        let write_txn = self
+            .redb
+            .begin_write()
+            .map_err(|e| WouError::DatabaseError(format!("Redb write txn failed: {e}")))?;
+        let listing = {
+            let mut list_table = write_txn
+                .open_table(ASSET_LISTINGS_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open asset table failed: {e}")))?;
+            let raw = list_table
+                .get(id)
+                .map_err(|e| WouError::DatabaseError(format!("Redb listing get failed: {e}")))?
+                .map(|g| g.value().to_vec());
+            let Some(b) = raw else {
+                return Err(WouError::ListingNotOpen(id.to_string()));
+            };
+            let mut l: Listing = serde_json::from_slice(&b)
+                .map_err(|e| WouError::Internal(format!("Listing parse failed: {e}")))?;
+            if l.status != "open" {
+                return Err(WouError::ListingNotOpen(id.to_string()));
+            }
+            if l.seller == buyer {
+                return Err(WouError::Internal("Cannot buy your own listing".into()));
+            }
+            let mut bal_table = write_txn
+                .open_table(SPIRAL_BALANCES_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open balances table failed: {e}")))?;
+            let buyer_bal: u64 = bal_table
+                .get(buyer)
+                .map_err(|e| WouError::DatabaseError(format!("Redb balance get failed: {e}")))?
+                .map(|g| g.value())
+                .unwrap_or(0);
+            if buyer_bal < l.price {
+                return Err(WouError::InsufficientBalance);
+            }
+            let seller_bal: u64 = bal_table
+                .get(l.seller.as_str())
+                .map_err(|e| WouError::DatabaseError(format!("Redb balance get failed: {e}")))?
+                .map(|g| g.value())
+                .unwrap_or(0);
+            bal_table
+                .insert(buyer, buyer_bal - l.price)
+                .map_err(|e| WouError::DatabaseError(format!("Insert balance failed: {e}")))?;
+            bal_table
+                .insert(l.seller.as_str(), seller_bal.saturating_add(l.price))
+                .map_err(|e| WouError::DatabaseError(format!("Insert balance failed: {e}")))?;
+            let mut inst_table = write_txn
+                .open_table(ASSET_INSTANCES_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open asset table failed: {e}")))?;
+            let a_raw = inst_table
+                .get(l.asset.as_str())
+                .map_err(|e| WouError::DatabaseError(format!("Redb asset get failed: {e}")))?
+                .map(|g| g.value().to_vec());
+            let Some(ab) = a_raw else {
+                return Err(WouError::AssetNotFound(l.asset.clone()));
+            };
+            let mut a: AssetInstance = serde_json::from_slice(&ab)
+                .map_err(|e| WouError::Internal(format!("Asset parse failed: {e}")))?;
+            if a.owner != l.seller || a.status != AssetStatus::Listed {
+                return Err(WouError::NotAssetOwner);
+            }
+            a.owner = buyer.to_string();
+            a.status = AssetStatus::Active;
+            inst_table
+                .insert(l.asset.as_str(), serde_json::to_vec(&a).unwrap().as_slice())
+                .map_err(|e| WouError::DatabaseError(format!("Insert asset failed: {e}")))?;
+            l.status = "sold".to_string();
+            list_table
+                .insert(id, serde_json::to_vec(&l).unwrap().as_slice())
+                .map_err(|e| WouError::DatabaseError(format!("Insert listing failed: {e}")))?;
+            Self::log_event_in(&write_txn, &Self::new_event(&l.asset, "trade", Some(l.seller.clone()), Some(buyer.to_string()), buyer))?;
+            l
+        };
+        write_txn
+            .commit()
+            .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
+        Ok(listing)
     }
 
     // ==========================================
