@@ -15,4 +15,7 @@ pub struct AppState {
     pub otp_expiry_seconds: u64,
     /// Ops inbox for abuse alerts (None = log-only). Env `WOU_ADMIN_ALERT_EMAIL`.
     pub admin_alert_email: Option<String>,
+    /// Closed producer set for asset mint/freeze/restore. Env `WOU_PRODUCER_IDS`
+    /// (comma-separated account ids). Empty = producer routes fail closed.
+    pub producer_ids: Vec<String>,
 }

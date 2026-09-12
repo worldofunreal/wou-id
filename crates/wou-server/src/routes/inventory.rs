@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use wou_storage::SettleTradeError;
+use wou_core::WouError;
 
 use crate::state::AppState;
 
@@ -141,11 +141,14 @@ pub async fn handle_trade_create(
     if payload.offered.is_empty() || payload.requested.is_empty() {
         return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "offered and requested must be non-empty"}))));
     }
-    // Verify sender owns offered
-    let inv = state.storage.get_inventory(&from).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
-    for c in &payload.offered {
-        if !inv.contains(c) {
-            return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("You do not own {}", c)}))));
+    // Offered must be asset instances ({token}#{serial}) owned by the caller.
+    // Requested must be existing instances (ownership checked at accept).
+    for c in payload.offered.iter().chain(payload.requested.iter()) {
+        match state.storage.get_asset(c).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))? {
+            Some(a) if a.owner == from => {}
+            Some(_) if payload.requested.contains(c) => {}
+            Some(_) => return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("You do not own {}", c)})))),
+            None => return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("Unknown asset {}", c)})))),
         }
     }
 
@@ -194,35 +197,25 @@ pub async fn handle_trade_accept(
     if trade.from_account == acceptor {
         return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Cannot accept your own trade"}))));
     }
-    // Verify acceptor owns requested
-    let inv_acceptor = state.storage.get_inventory(&acceptor).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
-    for c in &trade.requested {
-        if !inv_acceptor.contains(c) {
-            return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("Acceptor does not own {}", c)}))));
-        }
-    }
-    // Verify offerer still owns offered (race check)
-    let inv_offerer = state.storage.get_inventory(&trade.from_account).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
-    for c in &trade.offered {
-        if !inv_offerer.contains(c) {
-            return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("Offerer no longer owns {}", c)}))));
-        }
-    }
-    // Atomic settlement: single storage txn re-checks open-status (CAS
-    // against concurrent accepts/cancels) and both-side ownership, then
-    // swaps + flips status in one commit.
-    trade.status = "accepted".to_string();
-    let bytes = serde_json::to_vec(&trade).unwrap();
-    match state
+    // Atomic instance swap: both sides must still hold their instances.
+    // A concurrent accept leaves ownership changed, so the loser fails
+    // closed here (fail-closed beats double-spend).
+    if let Err(e) = state
         .storage
-        .settle_trade(&trade.id, &trade.from_account, &acceptor, &trade.offered, &trade.requested, &bytes)
+        .swap_instance_lists(&trade.offered, &trade.from_account, &trade.requested, &acceptor, &acceptor)
         .await
     {
-        Ok(()) => Ok(Json(trade)),
-        Err(SettleTradeError::NotOpen) => Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Trade not open"})))),
-        Err(SettleTradeError::OwnershipChanged) => Err((StatusCode::CONFLICT, Json(serde_json::json!({"error": "Inventory changed during settlement, retry"})))),
-        Err(SettleTradeError::Db(e)) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))),
+        let code = match e {
+            WouError::NotAssetOwner | WouError::AssetFrozen(_) => StatusCode::CONFLICT,
+            WouError::AssetNotFound(_) => StatusCode::BAD_REQUEST,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        return Err((code, Json(serde_json::json!({"error": e.to_string()}))));
     }
+    trade.status = "accepted".to_string();
+    let bytes = serde_json::to_vec(&trade).unwrap();
+    state.storage.save_trade(&trade.id, &bytes).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+    Ok(Json(trade))
 }
 
 pub async fn handle_trade_cancel(
