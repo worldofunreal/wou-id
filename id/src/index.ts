@@ -56,8 +56,7 @@ export interface EmbeddedWallets {
   evm_address: string;
   solana_address: string;
   icp_principal: string;
-  btc_bech32_address?: string;
-  derived_at: number;
+  bitcoin_address: string;
 }
 
 export interface LinkedIdentity {
@@ -68,19 +67,23 @@ export interface LinkedIdentity {
 
 export interface UserProfile {
   avatar_url?: string;
-  avatar_id?: string;
-  noble_animal?: string;
+  banner_url?: string;
   country?: string;
   bio?: string;
+  is_verified?: boolean;
   custom_attributes?: Record<string, unknown>;
 }
 
-export interface CrossGameStats {
+export interface CrossGameProfile {
   sow_rank?: string;
   sow_elo?: number;
-  cosmic_fleet_power?: number;
-  nftropoly_wealth_index?: number;
-  total_matches_played?: number;
+  sow_matches?: number;
+  sow_wins?: number;
+  sow_faction?: string;
+  cosmicrafts_level?: number;
+  cosmicrafts_fleet_power?: number;
+  nftropoly_net_worth?: number;
+  nftropoly_titles?: number;
 }
 
 export interface PlayerAccount {
@@ -91,8 +94,11 @@ export interface PlayerAccount {
   newsletter_opt_in: boolean;
   kind: 'human' | 'bot';
   clan_tag?: string;
+  clan_name?: string;
   clan_role?: 'owner' | 'elder' | 'member';
-  stats: CrossGameStats;
+  game_stats: CrossGameProfile;
+  followers_count: number;
+  following_count: number;
   embedded_wallets: EmbeddedWallets;
   linked_identities: LinkedIdentity[];
   profile: UserProfile;
@@ -106,8 +112,7 @@ export interface PlayerSearchResult {
   display_name: string;
   clan_tag?: string;
   avatar_url?: string;
-  noble_animal?: string;
-  sow_elo?: number;
+  animal_emoji?: string;
 }
 
 export interface Clan {
@@ -835,6 +840,85 @@ export class WouAuthClient {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to follow.');
+  }
+
+  public async unfollow(id: string): Promise<void> {
+    if (!this.sessionToken) throw new Error('Authentication required to unfollow.');
+    const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/social/unfollow/${encodeURIComponent(id)}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${this.sessionToken}` },
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to unfollow.');
+  }
+
+  public async getUserByUsername(username: string): Promise<PlayerAccount | null> {
+    const clean = username.trim().replace(/^@/, '');
+    if (!clean) return null;
+    try {
+      const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/user/by-username/${encodeURIComponent(clean)}`);
+      if (!res.ok) return null;
+      return (await res.json()) as PlayerAccount;
+    } catch {
+      return null;
+    }
+  }
+
+  public async checkUsername(username: string): Promise<{ username: string; available: boolean }> {
+    const clean = username.trim().replace(/^@/, '');
+    const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/user/check-username/${encodeURIComponent(clean)}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to check username.');
+    return data as { username: string; available: boolean };
+  }
+
+  public async updateProfile(input: {
+    display_name?: string;
+    username?: string;
+    bio?: string;
+    avatar_url?: string;
+    banner_url?: string;
+    country?: string;
+  }): Promise<PlayerAccount> {
+    if (!this.sessionToken || !this.user) throw new Error('Authentication required to update profile.');
+    const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/user/profile/${encodeURIComponent(this.user.id)}`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this.sessionToken}`,
+      },
+      body: JSON.stringify(input),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to update profile.');
+    this.setSession(this.sessionToken, data as PlayerAccount);
+    return data as PlayerAccount;
+  }
+
+  public async uploadMedia(
+    blob: Blob,
+    mediaType: 'avatar' | 'banner',
+  ): Promise<{ url: string; media_type: string; account: PlayerAccount }> {
+    if (!this.sessionToken) throw new Error('Authentication required to upload media.');
+    const form = new FormData();
+    form.append('file', blob, `${mediaType}.webp`);
+    form.append('media_type', mediaType);
+    const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/user/upload-media`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${this.sessionToken}` },
+      body: form,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to upload media.');
+    if (data.account) this.setSession(this.sessionToken, data.account as PlayerAccount);
+    return data as { url: string; media_type: string; account: PlayerAccount };
+  }
+
+  /** Opens the profile editor. The host app renders the modal (worldofunreal.com listens for this). */
+  public openEditProfileModal(): void {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('wou:open-edit-profile-modal'));
+    }
   }
 }
 
