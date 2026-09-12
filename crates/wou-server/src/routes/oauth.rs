@@ -1,13 +1,14 @@
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
 use serde::{Deserialize, Serialize};
 use tracing::info;
-use wou_core::{AuthProvider, GameContext, PlayerAccount};
+use wou_core::{AuthProvider, GameContext, PlayerAccount, SESSION_TTL_SECONDS};
 
+use crate::routes::guard::verified_owner;
 use crate::state::AppState;
 
 /// OAuth redirect targets are pinned: the central hub plus explicit per-game
@@ -63,8 +64,15 @@ pub async fn handle_oauth_login(
         }
     };
 
+    // Fail closed: no silent mock credentials. Unset env = 503, never a
+    // redirect built with a bogus client_id.
     let client_id_env = format!("WOU_{}_CLIENT_ID", provider.as_str().to_uppercase());
-    let client_id = std::env::var(&client_id_env).unwrap_or_else(|_| "mock_client_id".into());
+    let client_id = std::env::var(&client_id_env).map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": format!("OAuth provider not configured: {provider_str}")})),
+        )
+    })?;
     let redirect_uri = query
         .redirect_uri
         .or(query.redirect_url)
@@ -107,6 +115,7 @@ pub struct OAuthCallbackResponse {
 pub async fn handle_oauth_callback(
     Path(provider_str): Path<String>,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<OAuthCallbackPayload>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     let provider = match provider_str.to_lowercase().as_str() {
@@ -124,8 +133,19 @@ pub async fn handle_oauth_callback(
 
     let client_id_env = format!("WOU_{}_CLIENT_ID", provider.as_str().to_uppercase());
     let client_secret_env = format!("WOU_{}_CLIENT_SECRET", provider.as_str().to_uppercase());
-    let client_id = std::env::var(&client_id_env).unwrap_or_else(|_| "mock_client_id".into());
-    let client_secret = std::env::var(&client_secret_env).unwrap_or_else(|_| "mock_client_secret".into());
+    // Fail closed (see login handler): unset secrets = 503, never mock exchange.
+    let client_id = std::env::var(&client_id_env).map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": format!("OAuth provider not configured: {provider_str}")})),
+        )
+    })?;
+    let client_secret = std::env::var(&client_secret_env).map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": format!("OAuth provider not configured: {provider_str}")})),
+        )
+    })?;
 
     let redirect_uri = payload
         .redirect_uri
@@ -166,12 +186,20 @@ pub async fn handle_oauth_callback(
         let _ = state.storage.save_account(&existing).await;
         (existing, false)
     } else {
-        // Link to existing anonymous account or create fresh
-        let target_id = payload
-            .account_id
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        // Merge into the caller's own session account only (ownership proof).
+        // Otherwise mint fresh: a verified Google login must never adopt an
+        // arbitrary account id supplied by the client.
+        let target_id = match payload.account_id.clone() {
+            Some(id)
+                if state.storage.get_account_by_id(&id).await.ok().flatten().is_some()
+                    && verified_owner(&headers, &state, &id).await =>
+            {
+                id
+            }
+            _ => uuid::Uuid::new_v4().to_string(),
+        };
 
-        let wallets = wou_crypto::web3::derive_embedded_wallets(&target_id, "wou-sovereign-vault-secret-v1");
+        let wallets = wou_crypto::web3::derive_embedded_wallets(&target_id, &state.vault_seed);
         let mut account = match state.storage.get_account_by_id(&target_id).await {
             Ok(Some(anon)) => anon,
             _ => {
@@ -228,7 +256,7 @@ pub async fn handle_oauth_callback(
             &final_account.display_name,
             final_account.email.clone(),
             payload.context,
-            86400 * 30, // 30 days
+            SESSION_TTL_SECONDS,
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
 

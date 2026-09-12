@@ -18,4 +18,7 @@ pub struct AppState {
     /// Closed producer set for asset mint/freeze/restore. Env `WOU_PRODUCER_IDS`
     /// (comma-separated account ids). Empty = producer routes fail closed.
     pub producer_ids: Vec<String>,
+    /// Secret seed for embedded wallet derivation. Env `WOU_VAULT_SEED`
+    /// (required at boot, never hardcoded, never logged).
+    pub vault_seed: String,
 }

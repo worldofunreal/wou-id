@@ -32,12 +32,12 @@ impl JwtManager {
             context,
             iat: now,
             exp: now + validity_seconds,
+            jti: new_jti(),
         };
 
         encode(&Header::default(), &claims, &self.encoding_key)
             .map_err(|e| WouError::Internal(format!("Failed to encode JWT: {e}")))
     }
-
     /// Verify and decode a JWT Session Token.
     pub fn verify_token(&self, token: &str) -> Result<SessionClaims, WouError> {
         let validation = Validation::default();
@@ -45,6 +45,14 @@ impl JwtManager {
             .map(|data| data.claims)
             .map_err(|e| WouError::Unauthorized(format!("Invalid token: {e}")))
     }
+}
+
+/// Random 128-bit token ID (revocation handle). No new deps: rand is already used.
+fn new_jti() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    hex::encode(bytes)
 }
 
 #[cfg(test)]
@@ -69,5 +77,11 @@ mod tests {
         assert_eq!(claims.name, "Commander_Alpha");
         assert_eq!(claims.email, Some("alpha@shadowsofwar.io".to_string()));
         assert_eq!(claims.context, GameContext::ShadowsOfWar);
+        assert_eq!(claims.jti.len(), 32, "jti must be 128-bit hex (revocation handle)");
+        let token2 = mgr
+            .issue_token("usr_12345", "Commander_Alpha", None, GameContext::ShadowsOfWar, 3600)
+            .unwrap();
+        let claims2 = mgr.verify_token(&token2).unwrap();
+        assert_ne!(claims.jti, claims2.jti, "every token gets a unique jti");
     }
 }

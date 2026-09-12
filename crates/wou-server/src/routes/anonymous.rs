@@ -1,9 +1,9 @@
 use axum::{extract::State, http::HeaderMap, http::StatusCode, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use wou_core::{GameContext, PlayerAccount};
+use wou_core::{GameContext, PlayerAccount, SESSION_TTL_SECONDS};
 
-use crate::routes::guard::client_ip;
+use crate::routes::guard::{client_ip, verified_owner};
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -40,9 +40,19 @@ pub async fn handle_anonymous(
             Json(serde_json::json!({"error": e.to_string()})),
         ));
     }
-    // 1. If account_id provided, check if it already exists
+    // 1. Resume only with ownership proof: a valid JWT for that same account.
+    // A bare client-supplied id never mints a session (account-takeover hole).
     if let Some(ref acc_id) = payload.account_id {
-        if let Ok(Some(existing_account)) = state.storage.get_account_by_id(acc_id).await {
+        if state.storage.get_account_by_id(acc_id).await.ok().flatten().is_some() {
+            if !verified_owner(&headers, &state, acc_id).await {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({"error": "Existing account requires its session token to resume"})),
+                ));
+            }
+            let existing_account = state.storage.get_account_by_id(acc_id).await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?
+                .ok_or_else(|| (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Account not found"}))))?;
             let session_token = state
                 .jwt
                 .issue_token(
@@ -50,7 +60,7 @@ pub async fn handle_anonymous(
                     &existing_account.display_name,
                     existing_account.email.clone(),
                     payload.context,
-                    86400 * 30, // 30 days
+                    SESSION_TTL_SECONDS,
                 )
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
 
@@ -61,9 +71,10 @@ pub async fn handle_anonymous(
         }
     }
 
-    // 2. Generate a fresh canonical account with auto-embedded multi-chain wallets
-    let new_id = payload.account_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-    let wallets = wou_crypto::web3::derive_embedded_wallets(&new_id, "wou-sovereign-vault-secret-v1");
+    // 2. Fresh account: server-minted UUID (client-chosen ids are ignored,
+    // they enable id-squatting) with auto-embedded multi-chain wallets.
+    let new_id = Uuid::new_v4().to_string();
+    let wallets = wou_crypto::web3::derive_embedded_wallets(&new_id, &state.vault_seed);
     let account = PlayerAccount::new_with_wallets(new_id, None, payload.display_name, wallets);
 
     state
@@ -79,7 +90,7 @@ pub async fn handle_anonymous(
             &account.display_name,
             account.email.clone(),
             payload.context,
-            86400 * 30,
+            SESSION_TTL_SECONDS,
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
 

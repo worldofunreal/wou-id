@@ -11,7 +11,7 @@ use axum::{
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -47,6 +47,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Required secrets: no fallbacks. Missing env = refuse to boot (open-source safe).
     let jwt_secret =
         std::env::var("WOU_JWT_SECRET").expect("FATAL: WOU_JWT_SECRET must be set in environment");
+
+    // Embedded-wallet derivation seed: required env, never hardcoded.
+    // Rotating it changes every derived address (backfill re-heals empties on /me).
+    let vault_seed =
+        std::env::var("WOU_VAULT_SEED").expect("FATAL: WOU_VAULT_SEED must be set in environment");
 
     let smtp_host = std::env::var("WOU_SMTP_HOST").unwrap_or_else(|_| "mail.worldofunreal.com".into());
     let smtp_port: u16 = std::env::var("WOU_SMTP_PORT")
@@ -125,11 +130,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         otp_expiry_seconds,
         admin_alert_email,
         producer_ids,
+        vault_seed,
     };
 
-    // 4. Configure CORS & Routes
+    // 4. Configure CORS & Routes (explicit allowlist, never `*`: JWT auth rides on it).
+    // Extra origins via WOU_CORS_ORIGINS (comma-separated). Same shape as OAuth callbacks.
+    let mut allowed: Vec<axum::http::HeaderValue> = vec![
+        "https://worldofunreal.com".parse().unwrap(),
+        "https://id.worldofunreal.com".parse().unwrap(),
+        "https://shadowsofwar.io".parse().unwrap(),
+    ];
+    for o in std::env::var("WOU_CORS_ORIGINS").unwrap_or_default().split(',') {
+        let o = o.trim();
+        if !o.is_empty() {
+            if let Ok(v) = o.parse() {
+                allowed.push(v);
+            }
+        }
+    }
     let cors = CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin(AllowOrigin::list(allowed))
         .allow_methods(Any)
         .allow_headers(Any);
 
@@ -204,6 +224,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/assets/:id", get(routes::assets::handle_get_asset))
         .route("/api/v1/assets/owner/:account", get(routes::assets::handle_owner_assets))
         .route("/api/v1/assets/:id/events", get(routes::assets::handle_asset_events))
+        .route("/api/v1/assets/faucet", post(routes::assets::handle_faucet))
+        .route("/api/v1/assets/balance/me", get(routes::assets::handle_my_balance))
+        .route("/api/v1/assets/listings", post(routes::assets::handle_create_listing).get(routes::assets::handle_list_listings))
+        .route("/api/v1/assets/listings/:id/cancel", post(routes::assets::handle_cancel_listing))
+        .route("/api/v1/assets/listings/:id/buy", post(routes::assets::handle_buy_listing))
         // Newsletter Management
         .route("/api/v1/newsletter/subscribe", post(routes::newsletter::handle_newsletter_subscribe))
         .route("/api/v1/newsletter/unsubscribe", post(routes::newsletter::handle_newsletter_unsubscribe))

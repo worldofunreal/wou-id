@@ -40,6 +40,33 @@ pub async fn fire_admin_alert_once(state: &AppState, key: &str, subject: &str, b
     }
 }
 
+/// Ownership proof for link/merge flows: the caller must present a valid JWT
+/// whose subject IS the target account. A client-supplied `account_id` alone
+/// is never trusted (it used to mint sessions for arbitrary accounts).
+pub async fn verified_owner(
+    headers: &HeaderMap,
+    state: &AppState,
+    target_id: &str,
+) -> bool {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .map(|h| {
+            h.strip_prefix("Bearer ")
+                .or_else(|| h.strip_prefix("bearer "))
+                .unwrap_or(h)
+                .trim()
+        })
+        .unwrap_or("");
+    if token.is_empty() {
+        return false;
+    }
+    match state.jwt.verify_token(token) {
+        Ok(claims) => claims.sub == target_id,
+        Err(_) => false,
+    }
+}
+
 /// Short de-identified tag for logs (no PII on disk).
 pub fn log_tag(email: &str) -> String {
     wou_core::key_tag(email)

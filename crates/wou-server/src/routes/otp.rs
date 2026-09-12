@@ -1,10 +1,10 @@
 use axum::{extract::State, http::HeaderMap, http::StatusCode, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 use tracing::info;
-use wou_core::{canonical_email, AuthProvider, GameContext, PendingOtp, PlayerAccount, WouError};
+use wou_core::{canonical_email, AuthProvider, GameContext, PendingOtp, PlayerAccount, WouError, SESSION_TTL_SECONDS};
 use wou_crypto::generate_secure_otp;
 
-use crate::routes::guard::{client_ip, fire_admin_alert_once, log_tag};
+use crate::routes::guard::{client_ip, fire_admin_alert_once, log_tag, verified_owner};
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -173,6 +173,7 @@ pub struct OtpVerifyResponse {
 
 pub async fn handle_verify_otp(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<OtpVerifyPayload>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     let clean_email = canonical_email(&payload.email);
@@ -193,22 +194,31 @@ pub async fn handle_verify_otp(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
 
     let (mut final_account, is_new) = if let Some(mut existing_account) = existing_account_opt {
-        // Case 1: Account already exists with this email -> Login / Restore
-        existing_account.newsletter_opt_in = pending.newsletter_opt_in || existing_account.newsletter_opt_in;
+        // Case 1: Account already exists with this email -> Login / Restore.
+        // Newsletter preference is NOT touched here: the request payload is
+        // unauthenticated, so honoring it would let anyone flip opt-in on
+        // someone else's account. Opt-in changes belong to authed profile edits.
         existing_account.updated_at = chrono::Utc::now().timestamp() as u64;
         state.storage.save_account(&existing_account).await.map_err(|e| {
             (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
         })?;
         (existing_account, false)
     } else {
-        // Case 2: New email link
-        // If caller passed an active anonymous account_id, promote it!
-        let target_id = payload
-            .account_id
-            .or(pending.account_id)
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        // Case 2: New email link.
+        // Promote the caller's own session account only (ownership proof via
+        // Bearer, or the id minted at request time and echoed back). A verified
+        // email must never adopt an arbitrary account id supplied by the client.
+        let target_id = match payload.account_id.clone().or(pending.account_id.clone()) {
+            Some(id)
+                if state.storage.get_account_by_id(&id).await.ok().flatten().is_some()
+                    && verified_owner(&headers, &state, &id).await =>
+            {
+                id
+            }
+            _ => uuid::Uuid::new_v4().to_string(),
+        };
 
-        let wallets = wou_crypto::web3::derive_embedded_wallets(&target_id, "wou-sovereign-vault-secret-v1");
+        let wallets = wou_crypto::web3::derive_embedded_wallets(&target_id, &state.vault_seed);
         let mut account = match state.storage.get_account_by_id(&target_id).await {
             Ok(Some(anon_acc)) => anon_acc,
             _ => {
@@ -256,7 +266,7 @@ pub async fn handle_verify_otp(
             &final_account.display_name,
             final_account.email.clone(),
             payload.context,
-            86400 * 30, // 30 days
+            SESSION_TTL_SECONDS,
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
 

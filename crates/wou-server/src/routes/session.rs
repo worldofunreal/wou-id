@@ -1,6 +1,6 @@
 use axum::{extract::State, http::StatusCode, Json};
 use serde::Serialize;
-use wou_core::PlayerAccount;
+use wou_core::{PlayerAccount, SESSION_TTL_SECONDS};
 
 use crate::state::AppState;
 
@@ -19,7 +19,7 @@ async fn ensure_embedded_wallets(state: &AppState, mut account: PlayerAccount) -
         return account;
     }
     let derived =
-        wou_crypto::web3::derive_embedded_wallets(&account.id, "wou-sovereign-vault-secret-v1");
+        wou_crypto::web3::derive_embedded_wallets(&account.id, &state.vault_seed);
     let w = &mut account.embedded_wallets;
     if w.evm_address.is_empty() {
         w.evm_address = derived.evm_address;
@@ -65,7 +65,7 @@ pub struct RefreshResponse {
     pub session_token: String,
 }
 
-// Remember-me: re-issue a fresh 30d JWT when the old one still verifies.
+// Remember-me: re-issue a fresh short-lived JWT when the old one still verifies.
 pub async fn handle_refresh(
     auth: crate::AuthSession,
     State(state): State<AppState>,
@@ -98,7 +98,7 @@ pub async fn handle_refresh(
             &account.display_name,
             account.email.clone(),
             auth.claims.context,
-            86400 * 30,
+            SESSION_TTL_SECONDS,
         )
         .map_err(|e| {
             (
@@ -114,8 +114,19 @@ pub async fn handle_refresh(
     }))
 }
 
-// Stateless JWT: server has nothing to revoke yet (Valkey blocklist is a future step).
-// Endpoint exists so clients share one logout path and we can add revoke without breaking them.
-pub async fn handle_logout() -> Json<serde_json::Value> {
+// Logout revokes THIS token: its jti lands in Valkey with TTL = remaining life,
+// so the AuthSession extractor rejects it everywhere. Other devices stay logged in.
+pub async fn handle_logout(
+    auth: crate::AuthSession,
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    if !auth.claims.jti.is_empty() {
+        let now = chrono::Utc::now().timestamp() as u64;
+        let ttl = auth.claims.exp.saturating_sub(now).max(60);
+        let key = format!("wou_jwt_revoked:{}", auth.claims.jti);
+        if let Err(e) = state.storage.save_cache_string(&key, "1", ttl).await {
+            tracing::warn!("logout revocation stamp failed: {e}");
+        }
+    }
     Json(serde_json::json!({"status": "logged_out"}))
 }

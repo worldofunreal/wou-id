@@ -1,8 +1,9 @@
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{extract::State, http::{HeaderMap, StatusCode}, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
-use wou_core::{AuthProvider, GameContext, PlayerAccount};
+use wou_core::{AuthProvider, GameContext, PlayerAccount, SESSION_TTL_SECONDS};
 use wou_crypto::web3::{verify_ethereum_signature, verify_solana_signature};
 
+use crate::routes::guard::verified_owner;
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -68,6 +69,7 @@ pub async fn handle_web3_challenge(
 
 pub async fn handle_web3_verify(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<Web3VerifyRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     let chain = payload.chain.to_lowercase();
@@ -145,12 +147,19 @@ pub async fn handle_web3_verify(
         let _ = state.storage.save_account(&existing).await;
         (existing, false)
     } else {
-        // Link to existing anonymous account or create fresh
-        let target_id = payload
-            .account_id
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        // Merge into the caller's own session account only (ownership proof).
+        // A valid signature for wallet W must never adopt arbitrary account V.
+        let target_id = match payload.account_id.clone() {
+            Some(id)
+                if state.storage.get_account_by_id(&id).await.ok().flatten().is_some()
+                    && verified_owner(&headers, &state, &id).await =>
+            {
+                id
+            }
+            _ => uuid::Uuid::new_v4().to_string(),
+        };
 
-        let wallets = wou_crypto::web3::derive_embedded_wallets(&target_id, "wou-sovereign-vault-secret-v1");
+        let wallets = wou_crypto::web3::derive_embedded_wallets(&target_id, &state.vault_seed);
         let mut account = match state.storage.get_account_by_id(&target_id).await {
             Ok(Some(anon)) => anon,
             _ => {
@@ -175,7 +184,7 @@ pub async fn handle_web3_verify(
             &final_account.display_name,
             final_account.email.clone(),
             payload.context,
-            86400 * 30, // 30 days
+            SESSION_TTL_SECONDS,
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
 
