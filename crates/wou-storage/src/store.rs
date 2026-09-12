@@ -1,8 +1,9 @@
 use redb::{Database, ReadableTable, TableDefinition};
 use redis::AsyncCommands;
+use sha2::Digest;
 use std::sync::Arc;
 use tracing::info;
-use wou_core::{canonical_email, key_tag, AuthProvider, Clan, ClanMember, PendingOtp, PlayerAccount, PlayerSearchResult, WouError};
+use wou_core::{canonical_email, key_tag, AssetEvent, AssetInstance, AssetStatus, AuthProvider, Clan, ClanMember, Collection, PendingOtp, PlayerAccount, PlayerSearchResult, TokenMetadata, TokenType, WouError};
 
 const PLAYERS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_players");
 const IDENTITY_INDEX_TABLE: TableDefinition<&str, &str> = TableDefinition::new("wou_identity_index");
@@ -14,6 +15,10 @@ const FOLLOWERS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_
 const ACTIVITY_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_social_activity");
 const CLANS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_clans");
 const CLAN_MEMBERS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_clan_members");
+const ASSET_COLLECTIONS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_asset_collections");
+const ASSET_TOKENS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_asset_tokens");
+const ASSET_INSTANCES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_asset_instances");
+const ASSET_EVENTS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_asset_events");
 
 #[derive(Clone)]
 pub struct WouStorage {
@@ -75,6 +80,10 @@ impl WouStorage {
             let _ = write_txn.open_table(ACTIVITY_TABLE);
             let _ = write_txn.open_table(CLANS_TABLE);
             let _ = write_txn.open_table(CLAN_MEMBERS_TABLE);
+            let _ = write_txn.open_table(ASSET_COLLECTIONS_TABLE);
+            let _ = write_txn.open_table(ASSET_TOKENS_TABLE);
+            let _ = write_txn.open_table(ASSET_INSTANCES_TABLE);
+            let _ = write_txn.open_table(ASSET_EVENTS_TABLE);
         }
         write_txn
             .commit()
@@ -1130,6 +1139,492 @@ impl WouStorage {
             .commit()
             .map_err(|e| SettleTradeError::Db(WouError::DatabaseError(format!("Redb commit failed: {e}"))))?;
         Ok(())
+    }
+
+    // ==========================================
+    // DIGITAL ASSETS — custodial collectibles (registry + instances + events)
+    // ==========================================
+
+    /// Canonical digest of token metadata: frontends must serve bytes that
+    /// hash to the stored digest, otherwise the catalog drifted from truth.
+    pub fn metadata_digest(meta: &TokenMetadata) -> String {
+        let bytes = serde_json::to_vec(meta).unwrap_or_default();
+        hex::encode(sha2::Sha256::digest(&bytes))
+    }
+
+    fn put_json(
+        txn: &redb::WriteTransaction,
+        table: TableDefinition<&str, &[u8]>,
+        key: &str,
+        value: &[u8],
+    ) -> Result<(), WouError> {
+        let mut t = txn
+            .open_table(table)
+            .map_err(|e| WouError::DatabaseError(format!("Open asset table failed: {e}")))?;
+        t.insert(key, value)
+            .map_err(|e| WouError::DatabaseError(format!("Insert asset row failed: {e}")))?;
+        Ok(())
+    }
+
+    fn get_json(txn: &redb::ReadTransaction, table: TableDefinition<&str, &[u8]>, key: &str) -> Result<Option<Vec<u8>>, WouError> {
+        let t = txn
+            .open_table(table)
+            .map_err(|e| WouError::DatabaseError(format!("Open asset table failed: {e}")))?;
+        match t.get(key) {
+            Ok(Some(v)) => Ok(Some(v.value().to_vec())),
+            Ok(None) => Ok(None),
+            Err(e) => Err(WouError::DatabaseError(format!("Redb asset get failed: {e}"))),
+        }
+    }
+
+    pub async fn create_collection(&self, mut col: Collection) -> Result<Collection, WouError> {
+        col.created_at = chrono::Utc::now().timestamp() as u64;
+        let bytes = serde_json::to_vec(&col)
+            .map_err(|e| WouError::Internal(format!("Collection serialize failed: {e}")))?;
+        let write_txn = self
+            .redb
+            .begin_write()
+            .map_err(|e| WouError::DatabaseError(format!("Redb write txn failed: {e}")))?;
+        {
+            let read_check = self
+                .redb
+                .begin_read()
+                .map_err(|e| WouError::DatabaseError(format!("Redb read txn failed: {e}")))?;
+            if Self::get_json(&read_check, ASSET_COLLECTIONS_TABLE, &col.id)?.is_some() {
+                return Err(WouError::CollectionExists(col.id));
+            }
+            Self::put_json(&write_txn, ASSET_COLLECTIONS_TABLE, &col.id, &bytes)?;
+        }
+        write_txn
+            .commit()
+            .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
+        Ok(col)
+    }
+
+    pub async fn get_collection(&self, id: &str) -> Result<Option<Collection>, WouError> {
+        let read_txn = self
+            .redb
+            .begin_read()
+            .map_err(|e| WouError::DatabaseError(format!("Redb read txn failed: {e}")))?;
+        match Self::get_json(&read_txn, ASSET_COLLECTIONS_TABLE, id)? {
+            Some(b) => Ok(Some(
+                serde_json::from_slice(&b).map_err(|e| WouError::Internal(format!("Collection parse failed: {e}")))?,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    pub async fn list_collections(&self) -> Result<Vec<Collection>, WouError> {
+        let read_txn = self
+            .redb
+            .begin_read()
+            .map_err(|e| WouError::DatabaseError(format!("Redb read txn failed: {e}")))?;
+        let table = read_txn
+            .open_table(ASSET_COLLECTIONS_TABLE)
+            .map_err(|e| WouError::DatabaseError(format!("Open asset table failed: {e}")))?;
+        let mut out = Vec::new();
+        for item in table.iter().map_err(|e| WouError::DatabaseError(e.to_string()))? {
+            let (_, v) = item.map_err(|e| WouError::DatabaseError(e.to_string()))?;
+            if let Ok(c) = serde_json::from_slice::<Collection>(v.value()) {
+                out.push(c);
+            }
+        }
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(out)
+    }
+
+    pub async fn register_token(&self, mut tok: TokenType) -> Result<TokenType, WouError> {
+        if self.get_collection(&tok.collection).await?.is_none() {
+            return Err(WouError::Internal(format!("Unknown collection {}", tok.collection)));
+        }
+        if tok.max_supply == 0 {
+            return Err(WouError::Internal("max_supply must be > 0".into()));
+        }
+        tok.created_at = chrono::Utc::now().timestamp() as u64;
+        let bytes = serde_json::to_vec(&tok)
+            .map_err(|e| WouError::Internal(format!("Token serialize failed: {e}")))?;
+        let write_txn = self
+            .redb
+            .begin_write()
+            .map_err(|e| WouError::DatabaseError(format!("Redb write txn failed: {e}")))?;
+        {
+            let read_check = self
+                .redb
+                .begin_read()
+                .map_err(|e| WouError::DatabaseError(format!("Redb read txn failed: {e}")))?;
+            if Self::get_json(&read_check, ASSET_TOKENS_TABLE, &tok.id)?.is_some() {
+                return Err(WouError::TokenExists(tok.id));
+            }
+            Self::put_json(&write_txn, ASSET_TOKENS_TABLE, &tok.id, &bytes)?;
+        }
+        write_txn
+            .commit()
+            .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
+        Ok(tok)
+    }
+
+    pub async fn get_token(&self, id: &str) -> Result<Option<TokenType>, WouError> {
+        let read_txn = self
+            .redb
+            .begin_read()
+            .map_err(|e| WouError::DatabaseError(format!("Redb read txn failed: {e}")))?;
+        match Self::get_json(&read_txn, ASSET_TOKENS_TABLE, id)? {
+            Some(b) => Ok(Some(
+                serde_json::from_slice(&b).map_err(|e| WouError::Internal(format!("Token parse failed: {e}")))?,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    pub async fn tokens_of_collection(&self, collection: &str) -> Result<Vec<TokenType>, WouError> {
+        let read_txn = self
+            .redb
+            .begin_read()
+            .map_err(|e| WouError::DatabaseError(format!("Redb read txn failed: {e}")))?;
+        let table = read_txn
+            .open_table(ASSET_TOKENS_TABLE)
+            .map_err(|e| WouError::DatabaseError(format!("Open asset table failed: {e}")))?;
+        let mut out = Vec::new();
+        for item in table.iter().map_err(|e| WouError::DatabaseError(e.to_string()))? {
+            let (_, v) = item.map_err(|e| WouError::DatabaseError(e.to_string()))?;
+            if let Ok(t) = serde_json::from_slice::<TokenType>(v.value()) {
+                if t.collection == collection {
+                    out.push(t);
+                }
+            }
+        }
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(out)
+    }
+
+    fn log_event_in(txn: &redb::WriteTransaction, ev: &AssetEvent) -> Result<(), WouError> {
+        let bytes = serde_json::to_vec(ev)
+            .map_err(|e| WouError::Internal(format!("Event serialize failed: {e}")))?;
+        Self::put_json(txn, ASSET_EVENTS_TABLE, &ev.id, &bytes)
+    }
+
+    fn new_event(asset: &str, kind: &str, from: Option<String>, to: Option<String>, by: &str) -> AssetEvent {
+        AssetEvent {
+            id: uuid::Uuid::new_v4().to_string(),
+            asset: asset.to_string(),
+            kind: kind.to_string(),
+            from,
+            to,
+            by: by.to_string(),
+            at: chrono::Utc::now().timestamp() as u64,
+        }
+    }
+
+    /// Mint the next serial of a token to an owner. Single txn: supply check,
+    /// instance store, counter bump, event log. Fails closed when exhausted.
+    pub async fn claim_token(&self, token_id: &str, owner: &str, by: &str) -> Result<AssetInstance, WouError> {
+        let write_txn = self
+            .redb
+            .begin_write()
+            .map_err(|e| WouError::DatabaseError(format!("Redb write txn failed: {e}")))?;
+        let inst = {
+            let mut tokens = write_txn
+                .open_table(ASSET_TOKENS_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open asset table failed: {e}")))?;
+            let raw = tokens
+                .get(token_id)
+                .map_err(|e| WouError::DatabaseError(format!("Redb token get failed: {e}")))?
+                .map(|g| g.value().to_vec());
+            let Some(b) = raw else {
+                return Err(WouError::AssetNotFound(token_id.to_string()));
+            };
+            let mut tok: TokenType = serde_json::from_slice(&b)
+                .map_err(|e| WouError::Internal(format!("Token parse failed: {e}")))?;
+            if tok.minted >= tok.max_supply {
+                return Err(WouError::SupplyExhausted(token_id.to_string()));
+            }
+            tok.minted += 1;
+            let serial = tok.minted;
+            tokens
+                .insert(token_id, serde_json::to_vec(&tok).unwrap().as_slice())
+                .map_err(|e| WouError::DatabaseError(format!("Insert token failed: {e}")))?;
+            let inst = AssetInstance {
+                id: format!("{token_id}#{serial}"),
+                token: token_id.to_string(),
+                collection: tok.collection.clone(),
+                serial,
+                owner: owner.to_string(),
+                status: AssetStatus::Active,
+                metadata: tok.metadata.clone(),
+                metadata_digest: Self::metadata_digest(&tok.metadata),
+                minted_at: chrono::Utc::now().timestamp() as u64,
+            };
+            Self::put_json(
+                &write_txn,
+                ASSET_INSTANCES_TABLE,
+                &inst.id,
+                &serde_json::to_vec(&inst).unwrap(),
+            )?;
+            Self::log_event_in(&write_txn, &Self::new_event(&inst.id, "mint", None, Some(owner.to_string()), by))?;
+            inst
+        };
+        write_txn
+            .commit()
+            .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
+        Ok(inst)
+    }
+
+    pub async fn get_asset(&self, id: &str) -> Result<Option<AssetInstance>, WouError> {
+        let read_txn = self
+            .redb
+            .begin_read()
+            .map_err(|e| WouError::DatabaseError(format!("Redb read txn failed: {e}")))?;
+        match Self::get_json(&read_txn, ASSET_INSTANCES_TABLE, id)? {
+            Some(b) => Ok(Some(
+                serde_json::from_slice(&b).map_err(|e| WouError::Internal(format!("Asset parse failed: {e}")))?,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    /// Owner index is a scan (312 designs, small registry — per-owner table if it ever matters).
+    /// ponytail: full scan, add wou_assets_by_owner index if registry grows past thousands
+    pub async fn assets_of_owner(&self, owner: &str) -> Result<Vec<AssetInstance>, WouError> {
+        let read_txn = self
+            .redb
+            .begin_read()
+            .map_err(|e| WouError::DatabaseError(format!("Redb read txn failed: {e}")))?;
+        let table = read_txn
+            .open_table(ASSET_INSTANCES_TABLE)
+            .map_err(|e| WouError::DatabaseError(format!("Open asset table failed: {e}")))?;
+        let mut out = Vec::new();
+        for item in table.iter().map_err(|e| WouError::DatabaseError(e.to_string()))? {
+            let (_, v) = item.map_err(|e| WouError::DatabaseError(e.to_string()))?;
+            if let Ok(a) = serde_json::from_slice::<AssetInstance>(v.value()) {
+                if a.owner == owner {
+                    out.push(a);
+                }
+            }
+        }
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(out)
+    }
+
+    /// Owner-only move. CAS on current owner + Active status inside one txn.
+    pub async fn transfer_asset(&self, id: &str, expected_owner: &str, to: &str, by: &str) -> Result<AssetInstance, WouError> {
+        let write_txn = self
+            .redb
+            .begin_write()
+            .map_err(|e| WouError::DatabaseError(format!("Redb write txn failed: {e}")))?;
+        let inst = {
+            let mut table = write_txn
+                .open_table(ASSET_INSTANCES_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open asset table failed: {e}")))?;
+            let raw = table
+                .get(id)
+                .map_err(|e| WouError::DatabaseError(format!("Redb asset get failed: {e}")))?
+                .map(|g| g.value().to_vec());
+            let Some(b) = raw else {
+                return Err(WouError::AssetNotFound(id.to_string()));
+            };
+            let mut a: AssetInstance = serde_json::from_slice(&b)
+                .map_err(|e| WouError::Internal(format!("Asset parse failed: {e}")))?;
+            if a.owner != expected_owner {
+                return Err(WouError::NotAssetOwner);
+            }
+            if a.status != AssetStatus::Active {
+                return Err(WouError::AssetFrozen(id.to_string()));
+            }
+            let from = std::mem::replace(&mut a.owner, to.to_string());
+            table
+                .insert(id, serde_json::to_vec(&a).unwrap().as_slice())
+                .map_err(|e| WouError::DatabaseError(format!("Insert asset failed: {e}")))?;
+            Self::log_event_in(&write_txn, &Self::new_event(id, "transfer", Some(from), Some(to.to_string()), by))?;
+            a
+        };
+        write_txn
+            .commit()
+            .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
+        Ok(inst)
+    }
+
+    /// Producer-only repair path: freeze or restore any instance. This is the
+    /// custodial advantage over chain — theft and mistakes are reversible.
+    pub async fn set_asset_status(&self, id: &str, status: AssetStatus, by: &str) -> Result<AssetInstance, WouError> {
+        let kind = match status {
+            AssetStatus::Frozen => "freeze",
+            AssetStatus::Active => "restore",
+        };
+        let write_txn = self
+            .redb
+            .begin_write()
+            .map_err(|e| WouError::DatabaseError(format!("Redb write txn failed: {e}")))?;
+        let inst = {
+            let mut table = write_txn
+                .open_table(ASSET_INSTANCES_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open asset table failed: {e}")))?;
+            let raw = table
+                .get(id)
+                .map_err(|e| WouError::DatabaseError(format!("Redb asset get failed: {e}")))?
+                .map(|g| g.value().to_vec());
+            let Some(b) = raw else {
+                return Err(WouError::AssetNotFound(id.to_string()));
+            };
+            let mut a: AssetInstance = serde_json::from_slice(&b)
+                .map_err(|e| WouError::Internal(format!("Asset parse failed: {e}")))?;
+            a.status = status;
+            table
+                .insert(id, serde_json::to_vec(&a).unwrap().as_slice())
+                .map_err(|e| WouError::DatabaseError(format!("Insert asset failed: {e}")))?;
+            Self::log_event_in(&write_txn, &Self::new_event(id, kind, None, Some(a.owner.clone()), by))?;
+            a
+        };
+        write_txn
+            .commit()
+            .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
+        Ok(inst)
+    }
+
+    /// Atomic instance swap for trades: both instances must be Active and
+    /// owned by the expected sides, swapped + logged in one commit.
+    /// ponytail: mirrors settle_trade for instances; merge both when the legacy string inventory is retired
+    pub async fn swap_instances(
+        &self,
+        a_id: &str,
+        a_owner: &str,
+        b_id: &str,
+        b_owner: &str,
+        by: &str,
+    ) -> Result<(), WouError> {
+        let write_txn = self
+            .redb
+            .begin_write()
+            .map_err(|e| WouError::DatabaseError(format!("Redb write txn failed: {e}")))?;
+        {
+            let mut table = write_txn
+                .open_table(ASSET_INSTANCES_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open asset table failed: {e}")))?;
+            let load = |id: &str| -> Result<AssetInstance, WouError> {
+                let raw = table
+                    .get(id)
+                    .map_err(|e| WouError::DatabaseError(format!("Redb asset get failed: {e}")))?
+                    .map(|g| g.value().to_vec());
+                match raw {
+                    Some(b) => serde_json::from_slice(&b)
+                        .map_err(|e| WouError::Internal(format!("Asset parse failed: {e}"))),
+                    None => Err(WouError::AssetNotFound(id.to_string())),
+                }
+            };
+            let mut a = load(a_id)?;
+            let mut b = load(b_id)?;
+            if a.owner != a_owner || b.owner != b_owner {
+                return Err(WouError::NotAssetOwner);
+            }
+            if a.status != AssetStatus::Active || b.status != AssetStatus::Active {
+                return Err(WouError::AssetFrozen(a_id.to_string()));
+            }
+            std::mem::swap(&mut a.owner, &mut b.owner);
+            table
+                .insert(a_id, serde_json::to_vec(&a).unwrap().as_slice())
+                .map_err(|e| WouError::DatabaseError(format!("Insert asset failed: {e}")))?;
+            table
+                .insert(b_id, serde_json::to_vec(&b).unwrap().as_slice())
+                .map_err(|e| WouError::DatabaseError(format!("Insert asset failed: {e}")))?;
+            Self::log_event_in(&write_txn, &Self::new_event(a_id, "trade", Some(a_owner.to_string()), Some(b_owner.to_string()), by))?;
+            Self::log_event_in(&write_txn, &Self::new_event(b_id, "trade", Some(b_owner.to_string()), Some(a_owner.to_string()), by))?;
+        }
+        write_txn
+            .commit()
+            .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
+        Ok(())
+    }
+
+    /// Multi-asset atomic swap for card-for-card trades. Verifies every
+    /// instance is Active and held by the expected side, then swaps all
+    /// owners + logs trade events in one commit.
+    pub async fn swap_instance_lists(
+        &self,
+        offered: &[String],
+        offered_owner: &str,
+        requested: &[String],
+        requested_owner: &str,
+        by: &str,
+    ) -> Result<(), WouError> {
+        if offered.is_empty() || requested.is_empty() {
+            return Err(WouError::Internal("offered and requested must be non-empty".into()));
+        }
+        let write_txn = self
+            .redb
+            .begin_write()
+            .map_err(|e| WouError::DatabaseError(format!("Redb write txn failed: {e}")))?;
+        {
+            let mut table = write_txn
+                .open_table(ASSET_INSTANCES_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open asset table failed: {e}")))?;
+            let load = |id: &str| -> Result<AssetInstance, WouError> {
+                let raw = table
+                    .get(id)
+                    .map_err(|e| WouError::DatabaseError(format!("Redb asset get failed: {e}")))?
+                    .map(|g| g.value().to_vec());
+                match raw {
+                    Some(b) => serde_json::from_slice(&b)
+                        .map_err(|e| WouError::Internal(format!("Asset parse failed: {e}"))),
+                    None => Err(WouError::AssetNotFound(id.to_string())),
+                }
+            };
+            let mut off: Vec<AssetInstance> = offered.iter().map(|id| load(id)).collect::<Result<_, _>>()?;
+            let mut req: Vec<AssetInstance> = requested.iter().map(|id| load(id)).collect::<Result<_, _>>()?;
+            for a in &off {
+                if a.owner != offered_owner {
+                    return Err(WouError::NotAssetOwner);
+                }
+                if a.status != AssetStatus::Active {
+                    return Err(WouError::AssetFrozen(a.id.clone()));
+                }
+            }
+            for b in &req {
+                if b.owner != requested_owner {
+                    return Err(WouError::NotAssetOwner);
+                }
+                if b.status != AssetStatus::Active {
+                    return Err(WouError::AssetFrozen(b.id.clone()));
+                }
+            }
+            for a in &mut off {
+                a.owner = requested_owner.to_string();
+                table
+                    .insert(a.id.as_str(), serde_json::to_vec(&a).unwrap().as_slice())
+                    .map_err(|e| WouError::DatabaseError(format!("Insert asset failed: {e}")))?;
+                Self::log_event_in(&write_txn, &Self::new_event(&a.id, "trade", Some(offered_owner.to_string()), Some(requested_owner.to_string()), by))?;
+            }
+            for b in &mut req {
+                b.owner = offered_owner.to_string();
+                table
+                    .insert(b.id.as_str(), serde_json::to_vec(&b).unwrap().as_slice())
+                    .map_err(|e| WouError::DatabaseError(format!("Insert asset failed: {e}")))?;
+                Self::log_event_in(&write_txn, &Self::new_event(&b.id, "trade", Some(requested_owner.to_string()), Some(offered_owner.to_string()), by))?;
+            }
+        }
+        write_txn
+            .commit()
+            .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
+        Ok(())
+    }
+
+    pub async fn asset_events(&self, asset: &str) -> Result<Vec<AssetEvent>, WouError> {
+        let read_txn = self
+            .redb
+            .begin_read()
+            .map_err(|e| WouError::DatabaseError(format!("Redb read txn failed: {e}")))?;
+        let table = read_txn
+            .open_table(ASSET_EVENTS_TABLE)
+            .map_err(|e| WouError::DatabaseError(format!("Open asset table failed: {e}")))?;
+        let mut out = Vec::new();
+        for item in table.iter().map_err(|e| WouError::DatabaseError(e.to_string()))? {
+            let (_, v) = item.map_err(|e| WouError::DatabaseError(e.to_string()))?;
+            if let Ok(e) = serde_json::from_slice::<AssetEvent>(v.value()) {
+                if e.asset == asset {
+                    out.push(e);
+                }
+            }
+        }
+        out.sort_by(|a, b| a.at.cmp(&b.at));
+        Ok(out)
     }
 
     // ==========================================

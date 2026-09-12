@@ -44,6 +44,24 @@ pub enum WouError {
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 
+    #[error("Asset not found: {0}")]
+    AssetNotFound(String),
+
+    #[error("Not asset owner")]
+    NotAssetOwner,
+
+    #[error("Asset frozen: {0}")]
+    AssetFrozen(String),
+
+    #[error("Supply exhausted: {0}")]
+    SupplyExhausted(String),
+
+    #[error("Collection exists: {0}")]
+    CollectionExists(String),
+
+    #[error("Token exists: {0}")]
+    TokenExists(String),
+
     #[error("Internal server error: {0}")]
     Internal(String),
 }

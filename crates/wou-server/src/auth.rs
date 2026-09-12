@@ -102,6 +102,7 @@ mod tests {
             bots: Arc::new(crate::bots::BotClients::new()),
             otp_expiry_seconds: 600,
             admin_alert_email: None,
+            producer_ids: vec![],
         };
 
         // 1. Missing header

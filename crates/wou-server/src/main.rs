@@ -91,6 +91,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .filter(|s| !s.trim().is_empty());
 
+    // Closed producer set for asset mint/freeze/restore (unset = fail closed).
+    let producer_ids: Vec<String> = std::env::var("WOU_PRODUCER_IDS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
     // 3. Initialize Storage, Stalwart Mailer, and OAuth Manager
     let storage = WouStorage::new(&redis_url, &redb_path)?;
     let mailer_config = StalwartMailerConfig {
@@ -116,6 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bots,
         otp_expiry_seconds,
         admin_alert_email,
+        producer_ids,
     };
 
     // 4. Configure CORS & Routes
@@ -185,6 +194,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/inventory/trade/:id", get(routes::inventory::handle_trade_get))
         .route("/api/v1/inventory/trade/:id/accept", post(routes::inventory::handle_trade_accept))
         .route("/api/v1/inventory/trade/:id/cancel", post(routes::inventory::handle_trade_cancel))
+        // Digital assets — custodial collectibles (registry + instances + events)
+        .route("/api/v1/assets/collections", post(routes::assets::handle_create_collection).get(routes::assets::handle_list_collections))
+        .route("/api/v1/assets/collections/:id/tokens", get(routes::assets::handle_collection_tokens))
+        .route("/api/v1/assets/claim", post(routes::assets::handle_claim))
+        .route("/api/v1/assets/transfer/:id", post(routes::assets::handle_transfer))
+        .route("/api/v1/assets/freeze/:id", post(routes::assets::handle_freeze))
+        .route("/api/v1/assets/restore/:id", post(routes::assets::handle_restore))
+        .route("/api/v1/assets/:id", get(routes::assets::handle_get_asset))
+        .route("/api/v1/assets/owner/:account", get(routes::assets::handle_owner_assets))
+        .route("/api/v1/assets/:id/events", get(routes::assets::handle_asset_events))
         // Newsletter Management
         .route("/api/v1/newsletter/subscribe", post(routes::newsletter::handle_newsletter_subscribe))
         .route("/api/v1/newsletter/unsubscribe", post(routes::newsletter::handle_newsletter_unsubscribe))

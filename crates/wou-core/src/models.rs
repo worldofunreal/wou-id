@@ -489,6 +489,92 @@ pub struct PlayerSearchResult {
     pub clan_tag: Option<String>,
 }
 
+/// Digital assets — custodial collectible model shaped like Metaplex / ICRC-7
+/// metadata (name, description, image, attributes, collection) but with no
+/// chain: WOU-ID is the custodian and source of truth.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct AssetAttribute {
+    pub trait_type: String,
+    pub value: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TokenMetadata {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub image: String,
+    #[serde(default)]
+    pub attributes: Vec<AssetAttribute>,
+    pub collection: String,
+}
+
+/// A card design: one entry per collectible with a capped supply.
+/// Instances (`AssetInstance`) are the owned copies, numbered by serial.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TokenType {
+    pub id: String,
+    pub collection: String,
+    pub metadata: TokenMetadata,
+    pub max_supply: u32,
+    #[serde(default)]
+    pub minted: u32,
+    #[serde(default)]
+    pub created_at: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Collection {
+    pub id: String,
+    pub name: String,
+    pub symbol: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub image: String,
+    #[serde(default)]
+    pub created_at: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AssetStatus {
+    #[default]
+    Active,
+    Frozen,
+}
+
+/// One owned copy: `{token}#{serial}`, exactly one owner, never fractional.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct AssetInstance {
+    pub id: String,
+    pub token: String,
+    pub collection: String,
+    pub serial: u32,
+    pub owner: String,
+    pub status: AssetStatus,
+    pub metadata: TokenMetadata,
+    pub metadata_digest: String,
+    #[serde(default)]
+    pub minted_at: u64,
+}
+
+/// Append-only provenance: every mint/transfer/trade/freeze/restore.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct AssetEvent {
+    pub id: String,
+    pub asset: String,
+    pub kind: String, // mint | transfer | trade | freeze | restore
+    #[serde(default)]
+    pub from: Option<String>,
+    #[serde(default)]
+    pub to: Option<String>,
+    pub by: String,
+    #[serde(default)]
+    pub at: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,4 +1,5 @@
 pub mod anonymous;
+pub mod assets;
 pub mod bots;
 pub mod clan;
 pub mod guard;
