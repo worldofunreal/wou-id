@@ -413,8 +413,11 @@ pub struct SessionClaims {
     pub jti: String,
 }
 
-/// Session lifetime: 24h sliding (refresh re-issues while the old token verifies).
-pub const SESSION_TTL_SECONDS: u64 = 86400;
+/// Session lifetime: 30 days (same UX as always). Security comes from the
+/// jti revocation blocklist (logout kills the token server-side), not from
+/// short expiry: nothing auto-refreshes, so a short TTL would hard-logout
+/// users instead of protecting them.
+pub const SESSION_TTL_SECONDS: u64 = 86400 * 30;
 
 /// Public card: the ONLY account shape ever returned without auth.
 /// No email, no wallets, no linked identities, no internal flags.
