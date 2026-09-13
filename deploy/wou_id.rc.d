@@ -34,8 +34,16 @@ wou_id_prestart()
 	. "${wou_id_env_file}"
 	set +a
 
-	install -d -o sowdb -g sow -m 0750 /var/db/wou-id
+	# 0711: nginx (www) must walk through to uploads/ but must not be able to
+	# list the directory. The database file itself is 0600 below.
+	install -d -o sowdb -g sow -m 0711 /var/db/wou-id
+	install -d -o sowdb -g sow -m 0755 /var/db/wou-id/uploads
 	install -d -o sowdb -g sow -m 0750 /var/log/wou-id
+
+	# The account database must never be readable by other users on the host.
+	if [ -f /var/db/wou-id/wou_accounts.redb ]; then
+		chmod 0600 /var/db/wou-id/wou_accounts.redb
+	fi
 }
 
 run_rc_command "$1"
