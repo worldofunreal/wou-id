@@ -86,6 +86,14 @@ jobs:
             sudo install -d -o root -g wheel -m 755 ${JAIL_ROOT}/var/db/wou-id
             sudo install -d -o root -g wheel -m 755 ${JAIL_ROOT}/var/log/wou-id
 
+            # The env file is shared into the jail as a single-file mount, so the
+            # mount point must already exist as a regular file or the jail refuses
+            # to start.
+            if [ ! -f ${JAIL_ROOT}/usr/local/etc/wou-id/wou-id.env ]; then
+              sudo rm -rf ${JAIL_ROOT}/usr/local/etc/wou-id/wou-id.env
+              sudo touch ${JAIL_ROOT}/usr/local/etc/wou-id/wou-id.env
+            fi
+
             echo "[3/6] Ensuring jail service user (same uid/gid as host)..."
             sudo pw -R ${JAIL_ROOT} groupshow sow >/dev/null 2>&1 || sudo pw -R ${JAIL_ROOT} groupadd sow -g 1002
             sudo pw -R ${JAIL_ROOT} usershow sowdb >/dev/null 2>&1 || sudo pw -R ${JAIL_ROOT} useradd sowdb -u 1003 -g 1002 -d /nonexistent -s /usr/sbin/nologin

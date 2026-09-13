@@ -3,9 +3,13 @@
 # Host-side control for the wou-id jail.
 # `service wou_id start|stop|restart|status` drives the jail, so the deploy
 # pipeline keeps using the same command it always used.
+#
+# At boot the generic jail service already starts every jail in jail.conf,
+# including this one, so start is idempotent: if the jail is up we only
+# confirm the service answers.
 
 # PROVIDE: wou_id
-# REQUIRE: LOGIN cleanvar
+# REQUIRE: LOGIN cleanvar jail
 # KEYWORD: shutdown
 
 . /etc/rc.subr
@@ -28,6 +32,11 @@ restart_cmd="wou_id_jail_restart"
 status_cmd="wou_id_jail_status"
 extra_commands="status"
 
+wou_id_jid()
+{
+	/usr/sbin/jls -j "${wou_id_jail}" jid 2>/dev/null
+}
+
 wou_id_wait_healthy()
 {
 	i=0
@@ -45,18 +54,26 @@ wou_id_wait_healthy()
 
 wou_id_jail_start()
 {
-	/usr/sbin/service jail start "${wou_id_jail}" || return 1
+	if [ -n "$(wou_id_jid)" ]; then
+		echo "${wou_id_jail} already running (jid $(wou_id_jid))."
+	else
+		/usr/sbin/service jail start "${wou_id_jail}" || return 1
+	fi
 	wou_id_wait_healthy
 }
 
 wou_id_jail_stop()
 {
+	if [ -z "$(wou_id_jid)" ]; then
+		echo "${wou_id_jail} already stopped."
+		return 0
+	fi
 	/usr/sbin/service jail stop "${wou_id_jail}"
 }
 
 wou_id_jail_restart()
 {
-	/usr/sbin/service jail stop "${wou_id_jail}" 2>/dev/null
+	wou_id_jail_stop
 	sleep 1
 	/usr/sbin/service jail start "${wou_id_jail}" || return 1
 	wou_id_wait_healthy
@@ -64,8 +81,8 @@ wou_id_jail_restart()
 
 wou_id_jail_status()
 {
-	if /usr/sbin/jls -j "${wou_id_jail}" jid >/dev/null 2>&1; then
-		echo "${wou_id_jail} is running (jid $(/usr/sbin/jls -j "${wou_id_jail}" jid))."
+	if [ -n "$(wou_id_jid)" ]; then
+		echo "${wou_id_jail} is running (jid $(wou_id_jid))."
 		return 0
 	fi
 	echo "${wou_id_jail} is not running."
