@@ -1,0 +1,16 @@
+
+wou-id {
+    host.hostname = "wou-id.local";
+    path = /zroot/jails/wou-id;
+    ip4 = inherit;
+    ip6 = inherit;
+    mount.devfs;
+    devfs_ruleset = 4;
+    mount.fstab = "/etc/fstab.wou-id";
+    exec.clean;
+    exec.start = "/bin/sh /etc/rc";
+    exec.stop = "/bin/sh /etc/rc.shutdown jail";
+    allow.set_hostname = 0;
+    allow.sysvipc = 0;
+    enforce_statfs = 2;
+}

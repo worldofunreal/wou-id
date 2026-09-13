@@ -1,7 +1,11 @@
 #!/bin/sh
 
+# Runs INSIDE the wou-id jail. Valkey and Stalwart are reached over the
+# shared loopback (the jail inherits the host network), so there is no
+# in-jail service dependency to wait for.
+
 # PROVIDE: wou_id
-# REQUIRE: LOGIN valkey stalwart
+# REQUIRE: LOGIN
 # KEYWORD: shutdown
 
 . /etc/rc.subr

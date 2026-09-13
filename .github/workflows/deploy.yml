@@ -65,35 +65,61 @@ jobs:
             --exclude "id/node_modules" \
             ./ ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:~/.wou-id-build/
 
-      - name: Compile and Install Binary on FreeBSD Host
-        run: |
-          ssh -o StrictHostKeyChecking=no ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << 'EOF'
-            set -e
-            echo "[1/4] Compiling release binary on FreeBSD 15.1..."
-            cd ~/.wou-id-build
-            cargo build --release --bin wou-server
-
-            echo "[2/4] Backing up existing binary..."
-            if [ -f /usr/local/libexec/wou-server ]; then
-              sudo cp /usr/local/libexec/wou-server /usr/local/libexec/wou-server.bak_$(date +%s)
-            fi
-
-            echo "[3/4] Installing updated binary..."
-            sudo install -o sowdb -g sow -m 755 ~/.wou-id-build/target/release/wou-server /usr/local/libexec/wou-server
-
-            echo "[4/4] Restarting wou_id service..."
-            sudo service wou_id restart
-          EOF
-
-      - name: Sync Versioned Configurations (rc.d + nginx)
+      - name: Compile and Install Binary into the wou-id Jail
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << 'EOF'
             set -e
             ts=$(date +%s)
-            echo "[cfg 1/2] rc.d wou_id..."
+            JAIL_ROOT=/zroot/jails/wou-id
+
+            echo "[1/6] Compiling release binary on FreeBSD 15.1..."
+            cd ~/.wou-id-build
+            cargo build --release --bin wou-server
+
+            echo "[2/6] Ensuring jail dataset exists..."
+            if ! sudo zfs list ztmp/jails/wou-id >/dev/null 2>&1; then
+              sudo zfs clone ztmp/jails/base@clean ztmp/jails/wou-id
+            fi
+            sudo install -d -o root -g wheel -m 755 ${JAIL_ROOT}/usr/local/libexec
+            sudo install -d -o root -g wheel -m 755 ${JAIL_ROOT}/usr/local/etc/rc.d
+            sudo install -d -o root -g wheel -m 755 ${JAIL_ROOT}/usr/local/etc/wou-id
+            sudo install -d -o root -g wheel -m 755 ${JAIL_ROOT}/var/db/wou-id
+            sudo install -d -o root -g wheel -m 755 ${JAIL_ROOT}/var/log/wou-id
+
+            echo "[3/6] Ensuring jail service user (same uid/gid as host)..."
+            sudo pw -R ${JAIL_ROOT} groupshow sow >/dev/null 2>&1 || sudo pw -R ${JAIL_ROOT} groupadd sow -g 1002
+            sudo pw -R ${JAIL_ROOT} usershow sowdb >/dev/null 2>&1 || sudo pw -R ${JAIL_ROOT} useradd sowdb -u 1003 -g 1002 -d /nonexistent -s /usr/sbin/nologin
+
+            echo "[4/6] Installing jail config (rc.conf, service script, mounts, jail entry)..."
+            sudo install -o root -g wheel -m 644 ~/.wou-id-build/deploy/wou-id-jail.rc.conf ${JAIL_ROOT}/etc/rc.conf
+            sudo install -o root -g wheel -m 755 ~/.wou-id-build/deploy/wou_id.rc.d ${JAIL_ROOT}/usr/local/etc/rc.d/wou_id
+            sudo install -o root -g wheel -m 644 ~/.wou-id-build/deploy/fstab.wou-id /etc/fstab.wou-id
+            if ! sudo grep -q "^wou-id {" /etc/jail.conf; then
+              sudo cp /etc/jail.conf /etc/jail.conf.bak_${ts}
+              sudo cat ~/.wou-id-build/deploy/jail.conf.wou-id | sudo tee -a /etc/jail.conf >/dev/null
+            fi
+
+            echo "[5/6] Installing binary into the jail..."
+            if [ -f ${JAIL_ROOT}/usr/local/libexec/wou-server ]; then
+              sudo cp ${JAIL_ROOT}/usr/local/libexec/wou-server ${JAIL_ROOT}/usr/local/libexec/wou-server.bak_${ts}
+            fi
+            sudo install -o sowdb -g sow -m 755 ~/.wou-id-build/target/release/wou-server ${JAIL_ROOT}/usr/local/libexec/wou-server
+
+            echo "[6/6] Stopping the host instance, installing jail control, starting the jail..."
+            sudo service wou_id stop 2>/dev/null || true
+            sleep 1
             [ -f /usr/local/etc/rc.d/wou_id ] && sudo cp /usr/local/etc/rc.d/wou_id /usr/local/etc/rc.d/wou_id.bak_${ts} || true
-            sudo install -o root -g wheel -m 755 ~/.wou-id-build/deploy/wou_id.rc.d /usr/local/etc/rc.d/wou_id
-            echo "[cfg 2/2] nginx id.worldofunreal.com.conf..."
+            sudo install -o root -g wheel -m 755 ~/.wou-id-build/deploy/wou_id_jail.rc.d /usr/local/etc/rc.d/wou_id
+            sudo rm -f /usr/local/libexec/wou-server
+            sudo service wou_id start
+          EOF
+
+      - name: Sync Versioned nginx Configuration
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << 'EOF'
+            set -e
+            ts=$(date +%s)
+            echo "[cfg] nginx id.worldofunreal.com.conf..."
             [ -f /usr/local/etc/nginx/conf.d/id.worldofunreal.com.conf ] && sudo cp /usr/local/etc/nginx/conf.d/id.worldofunreal.com.conf /usr/local/etc/nginx/conf.d/id.worldofunreal.com.conf.bak_${ts} || true
             sudo install -o root -g wheel -m 644 ~/.wou-id-build/deploy/id.worldofunreal.com.conf /usr/local/etc/nginx/conf.d/id.worldofunreal.com.conf
             sudo nginx -t && sudo service nginx reload
@@ -101,12 +127,39 @@ jobs:
 
       - name: Verify Backend Health
         run: |
-          sleep 2
+          sleep 3
           response=$(curl -s -f https://id.worldofunreal.com/health)
           echo "Health Response: $response"
           if echo "$response" | grep -q "Online"; then
-            echo "WOU-ID Identity Engine is live and healthy!"
+            echo "WOU-ID Identity Engine is live and healthy inside its jail!"
           else
             echo "Health verification failed: $response"
             exit 1
           fi
+
+      - name: Verify Jail Isolation
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << 'EOF'
+            set -e
+            echo "[isolation] jail list:"
+            sudo jls | grep -E "JID|wou-id"
+            JID=$(sudo jls -j wou-id jid)
+            echo "[isolation] wou-id jail jid=${JID}"
+            echo "[isolation] wou-server process jid:"
+            ps -axo jid,comm | grep '[w]ou-server'
+            PJID=$(ps -axo jid,comm | grep '[w]ou-server' | awk '{print $1}' | head -1)
+            if [ "${PJID}" != "${JID}" ] || [ "${PJID}" = "0" ]; then
+              echo "FAIL: wou-server (jid ${PJID}) is not inside the wou-id jail (jid ${JID})"
+              exit 1
+            fi
+            echo "[isolation] jail must not see other services' data:"
+            if sudo jexec "${JID}" ls /srv/sow >/dev/null 2>&1; then
+              echo "FAIL: jail can read /srv/sow"
+              exit 1
+            fi
+            if sudo jexec "${JID}" ls /zroot/jails/mail >/dev/null 2>&1; then
+              echo "FAIL: jail can read the mail jail"
+              exit 1
+            fi
+            echo "OK: wou-id is isolated in its own jail."
+          EOF

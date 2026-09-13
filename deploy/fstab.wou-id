@@ -1,0 +1,3 @@
+/usr/local/etc/wou-id/wou-id.env /zroot/jails/wou-id/usr/local/etc/wou-id/wou-id.env nullfs ro 0 0
+/var/db/wou-id /zroot/jails/wou-id/var/db/wou-id nullfs rw 0 0
+/var/log/wou-id /zroot/jails/wou-id/var/log/wou-id nullfs rw 0 0
