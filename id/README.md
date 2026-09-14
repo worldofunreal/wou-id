@@ -1,5 +1,7 @@
 # `@worldofunreal/id`
 
+![WouID](./wouid-banner.webp)
+
 WouID — the single identity package for World of Unreal. Auth client logic
 plus the official sign-in modal. One publish, one version, every project tracks
 latest. Replaces the old `@worldofunreal/id-sdk` + `@worldofunreal/id-ui`

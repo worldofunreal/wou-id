@@ -1,6 +1,6 @@
 # 🛡️ World of Unreal Identity (`wou-id`)
 
-![WouID](./docs/assets/wouid.svg)
+![WouID](./docs/assets/wouid-banner.webp)
 
 > **WouID — Universal, Anonymous-First, Progressive Authentication & Multi-Platform Identity Engine for World of Unreal Games & Ecosystem Products.**
 

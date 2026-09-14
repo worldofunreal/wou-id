@@ -12,6 +12,7 @@
     "dist",
     "AuthModal.astro",
     "wouid.svg",
+    "wouid-banner.webp",
     "README.md"
   ],
   "scripts": {
