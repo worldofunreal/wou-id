@@ -27,7 +27,9 @@ pub fn fire_admin_alert(state: &AppState, subject: &str, body: String) {
         let mailer = state.mailer.clone();
         let subject = subject.to_string();
         tokio::spawn(async move {
-            let _ = mailer.send_admin_alert(&to, &subject, &body).await;
+            if let Err(e) = mailer.send_admin_alert(&to, &subject, &body).await {
+                tracing::warn!("admin alert failed ({subject}): {e}");
+            }
         });
     }
 }
