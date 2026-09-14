@@ -108,6 +108,8 @@ jobs:
             fi
             # Jail has no DNS without this (breaks Discord/OAuth/captcha calls out).
             sudo cp /etc/resolv.conf ${JAIL_ROOT}/etc/resolv.conf
+            # Jail needs the same mail shortcut as the host, else SMTP hairpins out and resets.
+            sudo grep -q "mail.worldofunreal.com" ${JAIL_ROOT}/etc/hosts || echo "127.0.0.1 mail.worldofunreal.com" | sudo tee -a ${JAIL_ROOT}/etc/hosts >/dev/null
 
             echo "[5/6] Installing binary into the jail..."
             if [ -f ${JAIL_ROOT}/usr/local/libexec/wou-server ]; then
