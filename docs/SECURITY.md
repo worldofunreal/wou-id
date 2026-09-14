@@ -35,6 +35,7 @@ the code is the source of truth; this file explains intent and operations.
 | OTP ladder 3/15min → 24h → 90d ban + appeal | `wou-storage/src/store.rs::tally_otp_request` |
 | Guess burn + abuse linkage | `store.rs::get_and_consume_otp` |
 | IP throttle 100/h, 300/d (IPv6 → /64) | `store.rs::tally_ip`, `wou-server/src/routes/guard.rs::client_ip` |
+| Contact escalation 2/h → 3rd bans IP 24h + owner email | `wou-server/src/routes/contact.rs`, `store.rs::block_ip` |
 | Protection mode flag | `store.rs::protection_mode`, gates in `otp.rs` + `anonymous.rs` |
 | Spike counter | `store.rs::tally_global_minute`, alert in `otp.rs` |
 | Plus-address normalization | `wou-core/src/models.rs::canonical_email` |
