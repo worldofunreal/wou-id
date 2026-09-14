@@ -106,6 +106,8 @@ jobs:
               sudo cp /etc/jail.conf /etc/jail.conf.bak_${ts}
               sudo cat ~/.wou-id-build/deploy/jail.conf.wou-id | sudo tee -a /etc/jail.conf >/dev/null
             fi
+            # Jail has no DNS without this (breaks Discord/OAuth/captcha calls out).
+            sudo cp /etc/resolv.conf ${JAIL_ROOT}/etc/resolv.conf
 
             echo "[5/6] Installing binary into the jail..."
             if [ -f ${JAIL_ROOT}/usr/local/libexec/wou-server ]; then
