@@ -108,6 +108,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .filter(|value| !value.trim().is_empty());
 
+    // Public contact form delivery (unset = endpoint 503s, never drops silently).
+    let contact_discord_webhook = std::env::var("WOU_CONTACT_DISCORD_WEBHOOK")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+
+    // Invisible bot-check secret (unset = check skipped, honeypot still on).
+    let recaptcha_secret = std::env::var("WOU_RECAPTCHA_SECRET")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+
     // 3. Initialize Storage, Stalwart Mailer, and OAuth Manager
     let storage = WouStorage::new(&redis_url, &redb_path)?;
     // Vault rotation (testing stage): re-derive every stored wallet with the
@@ -145,6 +155,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         producer_ids,
         vault_seed,
         wou_sow_identity_secret,
+        contact_discord_webhook,
+        recaptcha_secret,
     };
 
     // 4. Configure CORS & Routes (explicit allowlist, never `*`: JWT auth rides on it).
@@ -255,6 +267,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Newsletter Management
         .route("/api/v1/newsletter/subscribe", post(routes::newsletter::handle_newsletter_subscribe))
         .route("/api/v1/newsletter/unsubscribe", post(routes::newsletter::handle_newsletter_unsubscribe))
+        // Public contact inquiries (worldofunreal.com form)
+        .route("/api/v1/contact", post(routes::contact::handle_contact))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state);

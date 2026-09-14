@@ -124,6 +124,8 @@ mod tests {
             producer_ids: vec![],
             vault_seed: "test-only-dummy-vector-not-a-real-secret".to_string(),
             wou_sow_identity_secret: None,
+            contact_discord_webhook: None,
+            recaptcha_secret: None,
         };
 
         // 1. Missing header

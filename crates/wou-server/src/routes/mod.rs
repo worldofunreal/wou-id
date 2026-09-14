@@ -2,6 +2,7 @@ pub mod anonymous;
 pub mod assets;
 pub mod bots;
 pub mod clan;
+pub mod contact;
 pub mod guard;
 pub mod inventory;
 pub mod internal;

@@ -24,4 +24,10 @@ pub struct AppState {
     /// Server-to-server secret for verified game-provider identity resolution.
     /// Env `WOU_SOW_IDENTITY_SECRET`; unset disables the endpoint.
     pub wou_sow_identity_secret: Option<String>,
+    /// Discord webhook for public contact inquiries. Env
+    /// `WOU_CONTACT_DISCORD_WEBHOOK`; unset = contact endpoint 503s (no silent loss).
+    pub contact_discord_webhook: Option<String>,
+    /// Secret for the invisible bot-check. Env `WOU_RECAPTCHA_SECRET`;
+    /// unset = check skipped (honeypot + throttles still on).
+    pub recaptcha_secret: Option<String>,
 }
