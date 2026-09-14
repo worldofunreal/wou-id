@@ -4,10 +4,16 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use crate::{routes::guard::client_ip, state::AppState};
+
+/// Default work: ~1M hashes, a second or two on a phone. Humans never notice
+/// (it mines while they type); bots pay CPU for every single message.
+const DEFAULT_DIFFICULTY_BITS: u32 = 20;
+const CHALLENGE_TTL_SECS: u64 = 300;
 
 #[derive(Deserialize)]
 pub struct ContactPayload {
@@ -17,13 +23,83 @@ pub struct ContactPayload {
     /// Honeypot: real users leave it empty, bots fill it.
     #[serde(default)]
     pub website: String,
-    /// Invisible bot-check token (empty until site keys are configured).
+    /// Solved-work proof: id + counter such that
+    /// sha256("{nonce}:{counter}") has `difficulty` leading zero bits.
     #[serde(default)]
-    pub captcha_token: Option<String>,
+    pub challenge_id: String,
+    #[serde(default)]
+    pub counter: u64,
+}
+
+#[derive(Serialize)]
+pub struct ContactChallenge {
+    pub id: String,
+    pub nonce: String,
+    pub difficulty: u32,
+    pub expires_in_seconds: u64,
 }
 
 fn bad(msg: &'static str) -> (StatusCode, Json<serde_json::Value>) {
     (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": msg})))
+}
+
+fn difficulty(state: &AppState) -> u32 {
+    state.contact_difficulty.clamp(8, 28)
+}
+
+fn meets_difficulty(hex: &str, bits: u32) -> bool {
+    let bytes = match hex::decode(hex) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    let full = (bits / 8) as usize;
+    if bytes.len() < full + ((bits % 8 != 0) as usize) {
+        return false;
+    }
+    if bytes[..full].iter().any(|&b| b != 0) {
+        return false;
+    }
+    let rem = bits % 8;
+    rem == 0 || bytes[full] >> (8 - rem) == 0
+}
+
+pub async fn handle_contact_challenge(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let ip = client_ip(&headers);
+    if state.storage.protection_mode().await {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "Temporarily unavailable, try again later"})),
+        ));
+    }
+    if state.storage.tally_ip(&ip).await.is_err() {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "Too many messages, try again later"})),
+        ));
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let nonce = uuid::Uuid::new_v4().to_string().replace('-', "");
+    let bits = difficulty(&state);
+    state
+        .storage
+        .save_cache_string(
+            &format!("wou_contact_ch:{id}"),
+            &format!("{nonce}:{bits}"),
+            CHALLENGE_TTL_SECS,
+        )
+        .await
+        .map_err(|_| bad("Could not start, try again"))?;
+
+    Ok(Json(ContactChallenge {
+        id,
+        nonce,
+        difficulty: bits,
+        expires_in_seconds: CHALLENGE_TTL_SECS,
+    }))
 }
 
 pub async fn handle_contact(
@@ -89,29 +165,22 @@ pub async fn handle_contact(
         ));
     }
 
-    // Invisible bot-check: enforced only once its secret is configured.
-    let mut score_note = "off".to_string();
-    if let Some(secret) = state.recaptcha_secret.clone().filter(|s| !s.is_empty()) {
-        let token = payload.captcha_token.unwrap_or_default();
-        if token.trim().is_empty() {
-            return Err(bad("Bot verification required"));
-        }
-        let client = reqwest::Client::new();
-        let res = client
-            .post("https://www.google.com/recaptcha/api/siteverify")
-            .form(&[("secret", secret.as_str()), ("response", token.trim())])
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
-            .await
-            .map_err(|_| bad("Bot verification failed"))?;
-        let body: serde_json::Value = res.json().await.map_err(|_| bad("Bot verification failed"))?;
-        let ok = body.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
-        let score = body.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        score_note = format!("{score:.2}");
-        if !ok || score < 0.5 {
-            warn!("contact captcha rejected from {ip} (score {score:.2})");
-            return Err(bad("Bot verification failed"));
-        }
+    // Solved-work proof: single hash check (cheap for us, CPU cost for bots).
+    // Single-use + 5-minute expiry, same pattern as login nonces.
+    let stored = state
+        .storage
+        .take_cache_string(&format!("wou_contact_ch:{}", payload.challenge_id))
+        .await
+        .map_err(|_| bad("Stale challenge, try again"))?
+        .ok_or_else(|| bad("Stale challenge, try again"))?;
+    let (nonce, bits) = stored.split_once(':').ok_or_else(|| bad("Stale challenge, try again"))?;
+    let bits: u32 = bits.parse().unwrap_or(DEFAULT_DIFFICULTY_BITS);
+    let mut hasher = Sha256::new();
+    hasher.update(format!("{nonce}:{}", payload.counter).as_bytes());
+    let hex = hex::encode(hasher.finalize());
+    if !meets_difficulty(&hex, bits) {
+        warn!("contact bad proof from {ip}");
+        return Err(bad("Stale challenge, try again"));
     }
 
     let webhook = match state.contact_discord_webhook.clone().filter(|s| !s.is_empty()) {
@@ -126,7 +195,7 @@ pub async fn handle_contact(
     };
 
     let content = format!(
-        "**New inquiry**\n**Name:** {name}\n**Email:** {email}\n**Message:**\n{message}\n—\nIP: {ip} · check: {score_note} · {}",
+        "**New inquiry**\n**Name:** {name}\n**Email:** {email}\n**Message:**\n{message}\n—\nIP: {ip} · {}",
         chrono::Utc::now().to_rfc3339()
     );
     reqwest::Client::new()

@@ -125,7 +125,7 @@ mod tests {
             vault_seed: "test-only-dummy-vector-not-a-real-secret".to_string(),
             wou_sow_identity_secret: None,
             contact_discord_webhook: None,
-            recaptcha_secret: None,
+            contact_difficulty: 20,
         };
 
         // 1. Missing header

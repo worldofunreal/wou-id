@@ -27,7 +27,7 @@ pub struct AppState {
     /// Discord webhook for public contact inquiries. Env
     /// `WOU_CONTACT_DISCORD_WEBHOOK`; unset = contact endpoint 503s (no silent loss).
     pub contact_discord_webhook: Option<String>,
-    /// Secret for the invisible bot-check. Env `WOU_RECAPTCHA_SECRET`;
-    /// unset = check skipped (honeypot + throttles still on).
-    pub recaptcha_secret: Option<String>,
+    /// Work difficulty (leading zero bits) for the public contact challenge.
+    /// Env `WOU_CONTACT_DIFFICULTY`; default 20 (~a second of phone CPU).
+    pub contact_difficulty: u32,
 }

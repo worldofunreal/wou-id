@@ -113,10 +113,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .filter(|value| !value.trim().is_empty());
 
-    // Invisible bot-check secret (unset = check skipped, honeypot still on).
-    let recaptcha_secret = std::env::var("WOU_RECAPTCHA_SECRET")
+    // Contact challenge difficulty (unset = default, clamped 8-28 server-side).
+    let contact_difficulty: u32 = std::env::var("WOU_CONTACT_DIFFICULTY")
         .ok()
-        .filter(|value| !value.trim().is_empty());
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20);
 
     // 3. Initialize Storage, Stalwart Mailer, and OAuth Manager
     let storage = WouStorage::new(&redis_url, &redb_path)?;
@@ -156,7 +157,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         vault_seed,
         wou_sow_identity_secret,
         contact_discord_webhook,
-        recaptcha_secret,
+        contact_difficulty,
     };
 
     // 4. Configure CORS & Routes (explicit allowlist, never `*`: JWT auth rides on it).
@@ -269,6 +270,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/newsletter/unsubscribe", post(routes::newsletter::handle_newsletter_unsubscribe))
         // Public contact inquiries (worldofunreal.com form)
         .route("/api/v1/contact", post(routes::contact::handle_contact))
+        .route("/api/v1/contact/challenge", get(routes::contact::handle_contact_challenge))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state);
