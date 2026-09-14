@@ -10,9 +10,9 @@ use tracing::{info, warn};
 
 use crate::{routes::guard::client_ip, state::AppState};
 
-/// Default work: ~1M hashes, a second or two on a phone. Humans never notice
+/// Default work: ~250k hashes, a second or two on a phone. Humans never notice
 /// (it mines while they type); bots pay CPU for every single message.
-const DEFAULT_DIFFICULTY_BITS: u32 = 20;
+const DEFAULT_DIFFICULTY_BITS: u32 = 18;
 const CHALLENGE_TTL_SECS: u64 = 300;
 
 #[derive(Deserialize)]

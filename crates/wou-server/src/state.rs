@@ -28,6 +28,6 @@ pub struct AppState {
     /// `WOU_CONTACT_DISCORD_WEBHOOK`; unset = contact endpoint 503s (no silent loss).
     pub contact_discord_webhook: Option<String>,
     /// Work difficulty (leading zero bits) for the public contact challenge.
-    /// Env `WOU_CONTACT_DIFFICULTY`; default 20 (~a second of phone CPU).
+    /// Env `WOU_CONTACT_DIFFICULTY`; default 18 (~a second of phone CPU).
     pub contact_difficulty: u32,
 }
