@@ -8,7 +8,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
-use crate::{routes::guard::client_ip, state::AppState};
+use crate::{
+    routes::guard::{client_ip, fire_admin_alert},
+    state::AppState,
+};
 
 /// Default work: ~250k hashes, a second or two on a phone. Humans never notice
 /// (it mines while they type); bots pay CPU for every single message.
@@ -136,7 +139,8 @@ pub async fn handle_contact(
         return Err(bad("Message must be 1-2000 characters"));
     }
 
-    // Abuse gates: shared IP ceilings + 3 messages per hour per IP.
+    // Abuse gates: shared IP ceilings + 2 messages per hour per IP.
+    // The 3rd try in an hour blocks the address for 24h and pages the owner.
     if state.storage.tally_ip(&ip).await.is_err() {
         return Err((
             StatusCode::TOO_MANY_REQUESTS,
@@ -145,7 +149,7 @@ pub async fn handle_contact(
     }
     let hour = chrono::Utc::now().timestamp() / 3600;
     let mut slot_free = false;
-    for slot in 0..3 {
+    for slot in 0..2 {
         match state
             .storage
             .check_rate(&format!("wou_contact_hr:{ip}:{hour}:{slot}"), 3600)
@@ -159,9 +163,19 @@ pub async fn handle_contact(
         }
     }
     if !slot_free {
+        warn!("contact abuser banned: {ip} ({email})");
+        let _ = state.storage.block_ip(&ip, 86400).await;
+        fire_admin_alert(
+            &state,
+            "Contact abuser blocked",
+            format!(
+                "Address {ip} hit the contact form 3+ times in an hour and is blocked for 24h.\nLast try: {name} <{email}>\nTime: {}",
+                chrono::Utc::now().to_rfc3339()
+            ),
+        );
         return Err((
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(serde_json::json!({"error": "Too many messages, try again in an hour"})),
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "No more messages from here. Write to contact@worldofunreal.com"})),
         ));
     }
 

@@ -260,6 +260,18 @@ impl WouStorage {
         Ok(())
     }
 
+    /// Hard block an IP for `secs` seconds. Same key every intake gate
+    /// already honors, so one call closes all endpoints for that address.
+    pub async fn block_ip(&self, ip: &str, secs: u64) -> Result<(), WouError> {
+        let mut conn = self.get_redis().await?;
+        let key = format!("wou_ip_block:{ip}");
+        let _: () = conn
+            .set_ex(&key, "1", secs)
+            .await
+            .map_err(|e| WouError::DatabaseError(format!("Redis block failed: {e}")))?;
+        Ok(())
+    }
+
     /// True while the instance is in manual protection mode (botnet response).
     pub async fn protection_mode(&self) -> bool {
         match self.get_redis().await {
