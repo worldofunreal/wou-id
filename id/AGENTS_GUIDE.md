@@ -4,7 +4,7 @@ Esta guía es de lectura obligatoria para cualquier agente antes de integrar aut
 
 ---
 
-## 1. Arquitectura Centralizada de Identidad (SSO Hub)
+## 1. Centralized identity architecture (SSO hub)
 
 Para evitar errores de `redirect_uri_mismatch` en Google Cloud Console, Discord Developer y Apple Developer:
 
@@ -34,7 +34,11 @@ Para evitar errores de `redirect_uri_mismatch` en Google Cloud Console, Discord 
 ```
 
 > [!IMPORTANT]
-> **REGLA INVIOLABLE:** NUNCA envíes `window.location.origin/auth/callback` a Google u OAuth providers externos desde páginas satélite. El SDK ya utiliza automáticamente el Hub Central en `https://worldofunreal.com/auth/callback` empaquetando el proveedor y la URL de retorno en el parámetro `state`.
+> The default callback is the central hub at `https://worldofunreal.com/auth/callback`.
+> SOW is the explicit exception: pass
+> `{ redirectUri: 'https://shadowsofwar.io/auth/callback' }` so its own callback
+> can finish the login in the game. Never invent another callback URL; it must
+> be pinned in WOU-ID and registered in every provider console.
 
 ---
 

@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Canonical email for abuse keys: trimmed, lowercased, plus-tag stripped
-/// (`victim+1@x.com` and `victim@x.com` share one bucket — same mailbox).
+/// Canonical email for identity matching and abuse keys: trimmed, lowercased,
+/// and plus-tag stripped so aliases resolve to the same account.
 pub fn canonical_email(email: &str) -> String {
     let clean = email.trim().to_lowercase();
     match clean.split_once('@') {
@@ -144,32 +144,6 @@ pub struct EmbeddedWallets {
     pub bitcoin_address: String,
 }
 
-/// Cross-Game Studio Stats across Shadows of War, Cosmicrafts, and Nftropoly.
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
-pub struct CrossGameProfile {
-    // Shadows of War (RTS)
-    #[serde(default)]
-    pub sow_rank: String,
-    #[serde(default)]
-    pub sow_elo: u32,
-    #[serde(default)]
-    pub sow_matches: u32,
-    #[serde(default)]
-    pub sow_wins: u32,
-    #[serde(default)]
-    pub sow_faction: String,
-    // Cosmicrafts (Space Strategy)
-    #[serde(default)]
-    pub cosmicrafts_level: u32,
-    #[serde(default)]
-    pub cosmicrafts_fleet_power: u32,
-    // Nftropoly (Real Estate Metaverse)
-    #[serde(default)]
-    pub nftropoly_net_worth: u64,
-    #[serde(default)]
-    pub nftropoly_titles: u32,
-}
-
 /// A social activity timeline event emitted across the studio ecosystem.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct SocialActivity {
@@ -221,7 +195,8 @@ pub struct UserProfile {
 /// Master Player Account in World of Unreal Identity.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct PlayerAccount {
-    /// Canonical unique UUID.
+    /// Canonical unique account ID.
+    #[serde(rename = "account_id", alias = "id")]
     pub id: String,
     /// Unique public handle (@handle, e.g. "bizkit" or "commander_4821").
     #[serde(default)]
@@ -244,9 +219,6 @@ pub struct PlayerAccount {
     /// Auto-provisioned zero-overhead embedded wallets (EVM, SOL, ICP, BTC).
     #[serde(default)]
     pub embedded_wallets: EmbeddedWallets,
-    /// Unified cross-game studio statistics.
-    #[serde(default)]
-    pub game_stats: CrossGameProfile,
     /// Social graph follower counts.
     #[serde(default)]
     pub followers_count: u32,
@@ -352,17 +324,6 @@ impl PlayerAccount {
             welcome_sent: false,
             kind: AccountKind::Human,
             embedded_wallets: wallets,
-            game_stats: CrossGameProfile {
-                sow_rank: "Bronze I".into(),
-                sow_elo: 1000,
-                sow_matches: 0,
-                sow_wins: 0,
-                sow_faction: "Solar Dominion".into(),
-                cosmicrafts_level: 1,
-                cosmicrafts_fleet_power: 100,
-                nftropoly_net_worth: 50000,
-                nftropoly_titles: 0,
-            },
             followers_count: 0,
             following_count: 0,
             clan_tag: None,
@@ -381,6 +342,11 @@ impl PlayerAccount {
 
     /// Links an external identity provider to this player.
     pub fn link_identity(&mut self, provider: AuthProvider, external_id: String) {
+        let external_id = if matches!(&provider, AuthProvider::Email) {
+            canonical_email(&external_id)
+        } else {
+            external_id
+        };
         if !self.linked_identities.iter().any(|i| i.provider == provider && i.external_id == external_id) {
             let now = chrono::Utc::now().timestamp() as u64;
             self.linked_identities.push(LinkedIdentity {
@@ -423,6 +389,7 @@ pub const SESSION_TTL_SECONDS: u64 = 86400 * 30;
 /// No email, no wallets, no linked identities, no internal flags.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PublicProfile {
+    #[serde(rename = "account_id", alias = "id")]
     pub id: String,
     pub username: String,
     pub display_name: String,
@@ -435,7 +402,6 @@ pub struct PublicProfile {
     pub following_count: u32,
     pub clan_tag: Option<String>,
     pub clan_name: Option<String>,
-    pub game_stats: CrossGameProfile,
     /// Public profile metadata (avatar/banner/bio/country/verified/attributes).
     pub profile: UserProfile,
 }
@@ -455,7 +421,6 @@ impl From<&PlayerAccount> for PublicProfile {
             following_count: a.following_count,
             clan_tag: a.clan_tag.clone(),
             clan_name: a.clan_name.clone(),
-            game_stats: a.game_stats.clone(),
             profile: a.profile.clone(),
         }
     }
@@ -679,6 +644,10 @@ mod tests {
         assert_eq!(account.followers_count, 0);
         assert_eq!(account.following_count, 0);
         assert_eq!(account.embedded_wallets.evm_address, "");
+
+        let encoded = serde_json::to_value(&account).unwrap();
+        assert_eq!(encoded["account_id"], account.id);
+        assert!(encoded.get("id").is_none());
     }
 
     #[test]
@@ -702,6 +671,9 @@ mod tests {
             assert!(!s.contains(forbidden), "public card leaks {forbidden}");
         }
         assert_eq!(json["username"], "raven379");
+        assert_eq!(json["account_id"], "some-uuid");
+        assert!(json.get("id").is_none());
+        assert!(json.get("game_stats").is_none());
     }
 
     #[test]

@@ -104,6 +104,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter(|s| !s.is_empty())
         .collect();
 
+    let wou_sow_identity_secret = std::env::var("WOU_SOW_IDENTITY_SECRET")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+
     // 3. Initialize Storage, Stalwart Mailer, and OAuth Manager
     let storage = WouStorage::new(&redis_url, &redb_path)?;
     // Vault rotation (testing stage): re-derive every stored wallet with the
@@ -140,6 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         admin_alert_email,
         producer_ids,
         vault_seed,
+        wou_sow_identity_secret,
     };
 
     // 4. Configure CORS & Routes (explicit allowlist, never `*`: JWT auth rides on it).
@@ -187,8 +192,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/auth/otp/send", post(routes::otp::handle_request_otp))
         .route("/api/v1/auth/otp/verify", post(routes::otp::handle_verify_otp))
         // OAuth2 Auth
+        .route("/api/v1/auth/oauth/config", get(routes::oauth::handle_oauth_config))
         .route("/api/v1/auth/oauth/login/:provider", get(routes::oauth::handle_oauth_login))
         .route("/api/v1/auth/oauth/callback/:provider", post(routes::oauth::handle_oauth_callback))
+        .route(
+            "/api/v1/internal/identity/resolve",
+            post(routes::internal::handle_resolve_identity),
+        )
+        .route(
+            "/api/v1/internal/profile/reset-test-data",
+            post(routes::internal::handle_reset_human_accounts),
+        )
         // Web3 Direct Authentication (Solana & EVM)
         .route("/api/v1/auth/web3/challenge", post(routes::web3::handle_web3_challenge))
         .route("/api/v1/auth/web3/verify", post(routes::web3::handle_web3_verify))

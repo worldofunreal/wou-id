@@ -22,6 +22,15 @@ const ASSET_EVENTS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("w
 const SPIRAL_BALANCES_TABLE: TableDefinition<&str, u64> = TableDefinition::new("wou_spiral_balances");
 const ASSET_LISTINGS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_asset_listings");
 
+fn identity_index_key(provider: &AuthProvider, external_id: &str) -> String {
+    let value = if matches!(provider, AuthProvider::Email) {
+        canonical_email(external_id)
+    } else {
+        external_id.trim().to_lowercase()
+    };
+    format!("{}:{value}", provider.as_str())
+}
+
 #[derive(Clone)]
 pub struct WouStorage {
     redis_client: redis::Client,
@@ -52,6 +61,25 @@ fn swap_apply(inv: &mut Vec<String>, give: &[String], take: &[String]) {
     inv.extend(take.iter().cloned());
     inv.sort();
     inv.dedup();
+}
+
+fn json_mentions_account(value: &serde_json::Value, account_ids: &std::collections::BTreeSet<String>) -> bool {
+    match value {
+        serde_json::Value::String(value) => account_ids.contains(value),
+        serde_json::Value::Array(values) => values.iter().any(|value| json_mentions_account(value, account_ids)),
+        serde_json::Value::Object(values) => values.values().any(|value| json_mentions_account(value, account_ids)),
+        _ => false,
+    }
+}
+
+#[derive(serde::Serialize, Debug)]
+pub struct ResetHumanAccountsReport {
+    pub dry_run: bool,
+    pub human_accounts: u64,
+    pub bots_preserved: u64,
+    pub redb_rows_removed: u64,
+    pub redis_keys_removed: u64,
+    pub redis_members_removed: u64,
 }
 
 impl WouStorage {
@@ -528,7 +556,17 @@ impl WouStorage {
 
             // Index email
             if let Some(ref email) = account.email {
-                let index_key = format!("email:{}", email.to_lowercase());
+                let index_key = identity_index_key(&AuthProvider::Email, email);
+                if let Some(existing) = index_table
+                    .get(index_key.as_str())
+                    .map_err(|e| WouError::DatabaseError(format!("Email lookup failed: {e}")))?
+                {
+                    if existing.value() != account.id.as_str() {
+                        return Err(WouError::Internal(
+                            "email is already linked to another account".to_string(),
+                        ));
+                    }
+                }
                 index_table
                     .insert(index_key.as_str(), account.id.as_str())
                     .map_err(|e| WouError::DatabaseError(format!("Insert email index failed: {e}")))?;
@@ -536,7 +574,17 @@ impl WouStorage {
 
             // Index all linked identities
             for li in &account.linked_identities {
-                let index_key = format!("{}:{}", li.provider.as_str(), li.external_id.to_lowercase());
+                let index_key = identity_index_key(&li.provider, &li.external_id);
+                if let Some(existing) = index_table
+                    .get(index_key.as_str())
+                    .map_err(|e| WouError::DatabaseError(format!("Identity lookup failed: {e}")))?
+                {
+                    if existing.value() != account.id.as_str() {
+                        return Err(WouError::Internal(
+                            "identity is already linked to another account".to_string(),
+                        ));
+                    }
+                }
                 index_table
                     .insert(index_key.as_str(), account.id.as_str())
                     .map_err(|e| WouError::DatabaseError(format!("Insert identity index failed: {e}")))?;
@@ -547,11 +595,21 @@ impl WouStorage {
             .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
 
         // 2. Update Hot Cache in Redis
-        if let Ok(mut conn) = self.get_redis().await {
-            let redis_key = format!("wou_player:{}", account.id);
-            let _: Result<(), _> = conn.set_ex(&redis_key, serde_json::to_string(account).unwrap_or_default(), 86400).await;
-            let user_key = format!("wou_user_idx:{}", account.username.to_lowercase());
-            let _: Result<(), _> = conn.set_ex(&user_key, &account.id, 86400).await;
+        match self.get_redis().await {
+            Ok(mut conn) => {
+                let redis_key = format!("wou_player:{}", account.id);
+                if let Err(error) = conn
+                    .set_ex::<_, _, ()>(&redis_key, serde_json::to_string(account).unwrap_or_default(), 86400)
+                    .await
+                {
+                    tracing::warn!("WOU identity cache write failed: {error}");
+                }
+                let user_key = format!("wou_user_idx:{}", account.username.to_lowercase());
+                if let Err(error) = conn.set_ex::<_, _, ()>(&user_key, &account.id, 86400).await {
+                    tracing::warn!("WOU username cache write failed: {error}");
+                }
+            }
+            Err(error) => tracing::warn!("WOU identity cache connection failed: {error}"),
         }
 
         Ok(())
@@ -875,7 +933,7 @@ impl WouStorage {
         provider: &AuthProvider,
         external_id: &str,
     ) -> Result<Option<PlayerAccount>, WouError> {
-        let index_key = format!("{}:{}", provider.as_str(), external_id.to_lowercase());
+        let index_key = identity_index_key(provider, external_id);
 
         let read_txn = self
             .redb
@@ -895,8 +953,591 @@ impl WouStorage {
         }
     }
 
+    /// Resolve a provider identity and create its WOU account atomically.
+    /// Callers must verify the provider proof before reaching this method.
+    pub async fn resolve_or_create_service_identity(
+        &self,
+        provider: AuthProvider,
+        external_id: &str,
+        account: PlayerAccount,
+    ) -> Result<(PlayerAccount, bool), WouError> {
+        let external_id = external_id.trim();
+        if external_id.is_empty() || external_id.len() > 256 {
+            return Err(WouError::Internal("Invalid external identity".to_string()));
+        }
+        let index_key = identity_index_key(&provider, external_id);
+        let verified_email = account.email.as_deref().map(canonical_email);
+        let account_by_email = if let Some(email) = verified_email.as_deref() {
+            self.find_account_by_email(email).await?
+        } else {
+            None
+        };
+
+        let write_txn = self
+            .redb
+            .begin_write()
+            .map_err(|e| WouError::DatabaseError(format!("Redb write txn failed: {e}")))?;
+        let existing_id = {
+            let index_table = write_txn
+                .open_table(IDENTITY_INDEX_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open index table failed: {e}")))?;
+            let value = index_table
+                .get(index_key.as_str())
+                .map_err(|e| WouError::DatabaseError(format!("Identity lookup failed: {e}")))?
+                .map(|value| value.value().to_string());
+            value
+        };
+        if let Some(existing_id) = existing_id {
+            drop(write_txn);
+            let mut existing = self
+                .get_account_by_id(&existing_id)
+                .await?
+                .ok_or_else(|| WouError::AccountNotFound(existing_id.clone()))?;
+            if let Some(email_account) = account_by_email {
+                if email_account.id != existing.id {
+                    return Err(WouError::Internal(
+                        "verified email is already linked to another account".to_string(),
+                    ));
+                }
+            }
+            if let Some(email) = verified_email {
+                if existing.email.as_deref() != Some(email.as_str()) {
+                    if existing.email.is_some() {
+                        return Err(WouError::Internal(
+                            "account already has a different verified email".to_string(),
+                        ));
+                    }
+                    existing.email = Some(email);
+                    self.save_account(&existing).await?;
+                }
+            }
+            return Ok((existing, false));
+        }
+
+        if let Some(mut existing) = account_by_email {
+            drop(write_txn);
+            existing.link_identity(provider, external_id.to_string());
+            self.save_account(&existing).await?;
+            return Ok((existing, false));
+        }
+
+        let json_bytes = serde_json::to_vec(&account)
+            .map_err(|e| WouError::Internal(format!("Account serialization failed: {e}")))?;
+        {
+            let mut player_table = write_txn
+                .open_table(PLAYERS_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open players table failed: {e}")))?;
+            player_table
+                .insert(account.id.as_str(), json_bytes.as_slice())
+                .map_err(|e| WouError::DatabaseError(format!("Insert player failed: {e}")))?;
+
+            let mut index_table = write_txn
+                .open_table(IDENTITY_INDEX_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open index table failed: {e}")))?;
+            index_table
+                .insert(index_key.as_str(), account.id.as_str())
+                .map_err(|e| WouError::DatabaseError(format!("Insert identity index failed: {e}")))?;
+            for identity in &account.linked_identities {
+                let linked_key = identity_index_key(&identity.provider, &identity.external_id);
+                index_table
+                    .insert(linked_key.as_str(), account.id.as_str())
+                    .map_err(|e| WouError::DatabaseError(format!("Insert identity index failed: {e}")))?;
+            }
+
+            if !account.username.is_empty() {
+                let mut username_table = write_txn
+                    .open_table(USERNAME_INDEX_TABLE)
+                    .map_err(|e| WouError::DatabaseError(format!("Open username table failed: {e}")))?;
+                username_table
+                    .insert(account.username.to_lowercase().as_str(), account.id.as_str())
+                    .map_err(|e| WouError::DatabaseError(format!("Insert username index failed: {e}")))?;
+            }
+        }
+        write_txn
+            .commit()
+            .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
+
+        let cache_json = serde_json::to_string(&account)
+            .map_err(|e| WouError::Internal(format!("Account serialization failed: {e}")))?;
+        match self.get_redis().await {
+            Ok(mut conn) => {
+                if let Err(error) = conn
+                    .set_ex::<_, _, ()>(format!("wou_player:{}", account.id), cache_json, 86400)
+                    .await
+                {
+                    tracing::warn!("WOU identity cache write failed: {error}");
+                }
+            }
+            Err(error) => tracing::warn!("WOU identity cache connection failed: {error}"),
+        }
+        Ok((account, true))
+    }
+
     pub async fn find_account_by_email(&self, email: &str) -> Result<Option<PlayerAccount>, WouError> {
         self.find_account_by_identity(&AuthProvider::Email, email).await
+    }
+
+    /// Preview or remove disposable human accounts while preserving bots and
+    /// the global asset catalogue. This is intentionally operator-only and
+    /// requires a dry run before the HTTP caller performs the reset.
+    pub async fn reset_human_accounts(&self, dry_run: bool) -> Result<ResetHumanAccountsReport, WouError> {
+        let read_txn = self
+            .redb
+            .begin_read()
+            .map_err(|e| WouError::DatabaseError(format!("Redb read txn failed: {e}")))?;
+        let mut human_ids = std::collections::BTreeSet::new();
+        let mut bots_preserved = 0_u64;
+        let mut player_rows = Vec::new();
+        {
+            let table = read_txn
+                .open_table(PLAYERS_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open players table failed: {e}")))?;
+            for item in table.iter().map_err(|e| WouError::DatabaseError(e.to_string()))? {
+                let (key, value) = item.map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                let account_id = key.value().to_string();
+                let account: PlayerAccount = serde_json::from_slice(value.value())
+                    .map_err(|e| WouError::DatabaseError(format!("Player account parse failed: {e}")))?;
+                if account.kind == wou_core::AccountKind::Bot {
+                    bots_preserved = bots_preserved.saturating_add(1);
+                } else {
+                    human_ids.insert(account_id.clone());
+                    player_rows.push(account_id);
+                }
+            }
+        }
+
+        let mut identity_rows = Vec::new();
+        let mut username_rows = Vec::new();
+        let mut inventory_rows = Vec::new();
+        let mut follower_rows = Vec::new();
+        let mut activity_rows = Vec::new();
+        let mut clan_rows = Vec::new();
+        let mut clan_member_rows = Vec::new();
+        let mut removed_clans = std::collections::BTreeSet::new();
+        let mut removed_members_by_clan = std::collections::BTreeMap::<String, u64>::new();
+        let mut balance_rows = Vec::new();
+        let mut asset_rows = Vec::new();
+        let mut owned_assets = std::collections::BTreeSet::new();
+        let mut asset_event_rows = Vec::new();
+        let mut listing_rows = Vec::new();
+        let mut trade_rows = Vec::new();
+
+        {
+            let table = read_txn
+                .open_table(IDENTITY_INDEX_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open identity table failed: {e}")))?;
+            for item in table.iter().map_err(|e| WouError::DatabaseError(e.to_string()))? {
+                let (key, value) = item.map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                if human_ids.contains(value.value()) {
+                    identity_rows.push(key.value().to_string());
+                }
+            }
+        }
+        {
+            let table = read_txn
+                .open_table(USERNAME_INDEX_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open username table failed: {e}")))?;
+            for item in table.iter().map_err(|e| WouError::DatabaseError(e.to_string()))? {
+                let (key, value) = item.map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                if human_ids.contains(value.value()) {
+                    username_rows.push(key.value().to_string());
+                }
+            }
+        }
+        {
+            let table = read_txn
+                .open_table(INVENTORY_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open inventory table failed: {e}")))?;
+            for item in table.iter().map_err(|e| WouError::DatabaseError(e.to_string()))? {
+                let (key, _) = item.map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                if human_ids.contains(key.value()) {
+                    inventory_rows.push(key.value().to_string());
+                }
+            }
+        }
+        {
+            let table = read_txn
+                .open_table(FOLLOWERS_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open followers table failed: {e}")))?;
+            for item in table.iter().map_err(|e| WouError::DatabaseError(e.to_string()))? {
+                let (key, _) = item.map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                let parts = key.value().split(':').collect::<Vec<_>>();
+                if parts.len() == 3
+                    && parts[0] == "follow"
+                    && (human_ids.contains(parts[1]) || human_ids.contains(parts[2]))
+                {
+                    follower_rows.push(key.value().to_string());
+                }
+            }
+        }
+        {
+            let table = read_txn
+                .open_table(ACTIVITY_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open activity table failed: {e}")))?;
+            for item in table.iter().map_err(|e| WouError::DatabaseError(e.to_string()))? {
+                let (key, value) = item.map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                if let Ok(activity) = serde_json::from_slice::<wou_core::SocialActivity>(value.value()) {
+                    if human_ids.contains(&activity.account_id) {
+                        activity_rows.push(key.value().to_string());
+                    }
+                }
+            }
+        }
+        {
+            let table = read_txn
+                .open_table(CLANS_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open clans table failed: {e}")))?;
+            for item in table.iter().map_err(|e| WouError::DatabaseError(e.to_string()))? {
+                let (key, value) = item.map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                if let Ok(clan) = serde_json::from_slice::<Clan>(value.value()) {
+                    if human_ids.contains(&clan.leader_id) {
+                        removed_clans.insert(key.value().to_string());
+                        clan_rows.push(key.value().to_string());
+                    }
+                }
+            }
+        }
+        {
+            let table = read_txn
+                .open_table(CLAN_MEMBERS_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open clan members table failed: {e}")))?;
+            for item in table.iter().map_err(|e| WouError::DatabaseError(e.to_string()))? {
+                let (key, value) = item.map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                let key_text = key.value();
+                let clan_tag = key_text.split(':').next().unwrap_or_default().to_string();
+                let remove = removed_clans.contains(&clan_tag)
+                    || serde_json::from_slice::<ClanMember>(value.value())
+                        .ok()
+                        .is_some_and(|member| human_ids.contains(&member.account_id));
+                if remove {
+                    clan_member_rows.push(key_text.to_string());
+                    if !removed_clans.contains(&clan_tag) {
+                        *removed_members_by_clan.entry(clan_tag).or_default() += 1;
+                    }
+                }
+            }
+        }
+        {
+            let table = read_txn
+                .open_table(SPIRAL_BALANCES_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open balances table failed: {e}")))?;
+            for item in table.iter().map_err(|e| WouError::DatabaseError(e.to_string()))? {
+                let (key, _) = item.map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                if human_ids.contains(key.value()) {
+                    balance_rows.push(key.value().to_string());
+                }
+            }
+        }
+        {
+            let table = read_txn
+                .open_table(ASSET_INSTANCES_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open asset instances table failed: {e}")))?;
+            for item in table.iter().map_err(|e| WouError::DatabaseError(e.to_string()))? {
+                let (key, value) = item.map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                if let Ok(asset) = serde_json::from_slice::<AssetInstance>(value.value()) {
+                    if human_ids.contains(&asset.owner) {
+                        owned_assets.insert(asset.id.clone());
+                        asset_rows.push(key.value().to_string());
+                    }
+                }
+            }
+        }
+        {
+            let table = read_txn
+                .open_table(ASSET_EVENTS_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open asset events table failed: {e}")))?;
+            for item in table.iter().map_err(|e| WouError::DatabaseError(e.to_string()))? {
+                let (key, value) = item.map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                if let Ok(event) = serde_json::from_slice::<AssetEvent>(value.value()) {
+                    if owned_assets.contains(&event.asset)
+                        || human_ids.contains(&event.by)
+                        || event.from.as_deref().is_some_and(|id| human_ids.contains(id))
+                        || event.to.as_deref().is_some_and(|id| human_ids.contains(id))
+                    {
+                        asset_event_rows.push(key.value().to_string());
+                    }
+                }
+            }
+        }
+        {
+            let table = read_txn
+                .open_table(ASSET_LISTINGS_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open asset listings table failed: {e}")))?;
+            for item in table.iter().map_err(|e| WouError::DatabaseError(e.to_string()))? {
+                let (key, value) = item.map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                if let Ok(listing) = serde_json::from_slice::<Listing>(value.value()) {
+                    if human_ids.contains(&listing.seller) || owned_assets.contains(&listing.asset) {
+                        listing_rows.push(key.value().to_string());
+                    }
+                }
+            }
+        }
+        {
+            let table = read_txn
+                .open_table(TRADES_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open trades table failed: {e}")))?;
+            for item in table.iter().map_err(|e| WouError::DatabaseError(e.to_string()))? {
+                let (key, value) = item.map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                if let Ok(trade) = serde_json::from_slice::<serde_json::Value>(value.value()) {
+                    if json_mentions_account(&trade, &human_ids) {
+                        trade_rows.push(key.value().to_string());
+                    }
+                }
+            }
+        }
+        drop(read_txn);
+
+        let mut redis_keys = std::collections::BTreeSet::new();
+        for account_id in &human_ids {
+            redis_keys.insert(format!("wou_player:{account_id}"));
+            redis_keys.insert(format!("wou_following:{account_id}"));
+            redis_keys.insert(format!("wou_followers:{account_id}"));
+            redis_keys.insert(format!("wou_tg_accounts:{account_id}"));
+            redis_keys.insert(format!("wou_dc_accounts:{account_id}"));
+        }
+        let mut redis = self.get_redis().await?;
+        let mut cursor = 0_u64;
+        loop {
+            let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg("wou_user_idx:*")
+                .arg("COUNT")
+                .arg(256)
+                .query_async(&mut redis)
+                .await
+                .map_err(|e| WouError::DatabaseError(format!("Redis scan failed: {e}")))?;
+            for key in keys {
+                let value: Option<String> = redis
+                    .get(&key)
+                    .await
+                    .map_err(|e| WouError::DatabaseError(format!("Redis lookup failed: {e}")))?;
+                if value.is_some_and(|id| human_ids.contains(&id)) {
+                    redis_keys.insert(key);
+                }
+            }
+            cursor = next;
+            if cursor == 0 {
+                break;
+            }
+        }
+
+        for pattern in ["wou_tg_link:*", "wou_dc_link:*"] {
+            let mut scan_cursor = 0_u64;
+            loop {
+                let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                    .arg(scan_cursor)
+                    .arg("MATCH")
+                    .arg(pattern)
+                    .arg("COUNT")
+                    .arg(256)
+                    .query_async(&mut redis)
+                    .await
+                    .map_err(|e| WouError::DatabaseError(format!("Redis scan failed: {e}")))?;
+                for key in keys {
+                    let value: Option<String> = redis
+                        .get(&key)
+                        .await
+                        .map_err(|e| WouError::DatabaseError(format!("Redis lookup failed: {e}")))?;
+                    if value.is_some_and(|id| human_ids.contains(&id)) {
+                        redis_keys.insert(key);
+                    }
+                }
+                scan_cursor = next;
+                if scan_cursor == 0 {
+                    break;
+                }
+            }
+        }
+
+        for tag in removed_clans
+            .iter()
+            .chain(removed_members_by_clan.keys())
+        {
+            redis_keys.insert(format!("wou_clan:{tag}"));
+        }
+
+        let mut redis_members_removed = 0_u64;
+        for pattern in ["wou_following:*", "wou_followers:*"] {
+            let mut scan_cursor = 0_u64;
+            loop {
+                let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                    .arg(scan_cursor)
+                    .arg("MATCH")
+                    .arg(pattern)
+                    .arg("COUNT")
+                    .arg(256)
+                    .query_async(&mut redis)
+                    .await
+                    .map_err(|e| WouError::DatabaseError(format!("Redis scan failed: {e}")))?;
+                for key in keys {
+                    let owner_is_human = key
+                        .rsplit(':')
+                        .next()
+                        .is_some_and(|id| human_ids.contains(id));
+                    if owner_is_human {
+                        redis_keys.insert(key);
+                        continue;
+                    }
+                    let members: Vec<String> = redis
+                        .smembers(&key)
+                        .await
+                        .map_err(|e| WouError::DatabaseError(format!("Redis set read failed: {e}")))?;
+                    let remove = members
+                        .iter()
+                        .filter(|id| human_ids.contains(*id))
+                        .count() as u64;
+                    redis_members_removed = redis_members_removed.saturating_add(remove);
+                    if !dry_run {
+                        for id in members {
+                            if human_ids.contains(&id) {
+                                let _: u32 = redis
+                                    .srem(&key, &id)
+                                    .await
+                                    .map_err(|e| WouError::DatabaseError(format!("Redis set update failed: {e}")))?;
+                            }
+                        }
+                    }
+                }
+                scan_cursor = next;
+                if scan_cursor == 0 {
+                    break;
+                }
+            }
+        }
+
+        let feed: Vec<String> = redis
+            .lrange("wou_global_activity_feed", 0, -1)
+            .await
+            .map_err(|e| WouError::DatabaseError(format!("Redis activity feed read failed: {e}")))?;
+        let filtered_feed = feed
+            .iter()
+            .filter(|entry| {
+                serde_json::from_str::<serde_json::Value>(entry)
+                    .ok()
+                    .is_none_or(|value| !json_mentions_account(&value, &human_ids))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        redis_members_removed = redis_members_removed.saturating_add((feed.len() - filtered_feed.len()) as u64);
+
+        let redb_rows_removed = (player_rows.len()
+            + identity_rows.len()
+            + username_rows.len()
+            + inventory_rows.len()
+            + follower_rows.len()
+            + activity_rows.len()
+            + clan_rows.len()
+            + clan_member_rows.len()
+            + balance_rows.len()
+            + asset_rows.len()
+            + asset_event_rows.len()
+            + listing_rows.len()
+            + trade_rows.len()) as u64;
+
+        if !dry_run {
+            for key in &redis_keys {
+                let _: u64 = redis
+                    .del(key)
+                    .await
+                    .map_err(|e| WouError::DatabaseError(format!("Redis key removal failed: {e}")))?;
+            }
+            if feed.len() != filtered_feed.len() {
+                let _: u64 = redis
+                    .del("wou_global_activity_feed")
+                    .await
+                    .map_err(|e| WouError::DatabaseError(format!("Redis activity feed clear failed: {e}")))?;
+                for entry in &filtered_feed {
+                    let _: usize = redis
+                        .rpush("wou_global_activity_feed", entry)
+                        .await
+                        .map_err(|e| WouError::DatabaseError(format!("Redis activity feed restore failed: {e}")))?;
+                }
+            }
+
+            let write_txn = self
+                .redb
+                .begin_write()
+                .map_err(|e| WouError::DatabaseError(format!("Redb write txn failed: {e}")))?;
+            {
+                let mut table = write_txn.open_table(PLAYERS_TABLE).map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                for key in &player_rows { table.remove(key.as_str()).map_err(|e| WouError::DatabaseError(e.to_string()))?; }
+            }
+            {
+                let mut table = write_txn.open_table(IDENTITY_INDEX_TABLE).map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                for key in &identity_rows { table.remove(key.as_str()).map_err(|e| WouError::DatabaseError(e.to_string()))?; }
+            }
+            {
+                let mut table = write_txn.open_table(USERNAME_INDEX_TABLE).map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                for key in &username_rows { table.remove(key.as_str()).map_err(|e| WouError::DatabaseError(e.to_string()))?; }
+            }
+            {
+                let mut table = write_txn.open_table(INVENTORY_TABLE).map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                for key in &inventory_rows { table.remove(key.as_str()).map_err(|e| WouError::DatabaseError(e.to_string()))?; }
+            }
+            {
+                let mut table = write_txn.open_table(FOLLOWERS_TABLE).map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                for key in &follower_rows { table.remove(key.as_str()).map_err(|e| WouError::DatabaseError(e.to_string()))?; }
+            }
+            {
+                let mut table = write_txn.open_table(ACTIVITY_TABLE).map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                for key in &activity_rows { table.remove(key.as_str()).map_err(|e| WouError::DatabaseError(e.to_string()))?; }
+            }
+            {
+                let mut table = write_txn.open_table(CLAN_MEMBERS_TABLE).map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                for key in &clan_member_rows { table.remove(key.as_str()).map_err(|e| WouError::DatabaseError(e.to_string()))?; }
+            }
+            {
+                let mut table = write_txn.open_table(CLANS_TABLE).map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                for key in &clan_rows {
+                    table.remove(key.as_str()).map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                }
+                for (tag, removed) in &removed_members_by_clan {
+                    let clan_bytes = table
+                        .get(tag.as_str())
+                        .map_err(|e| WouError::DatabaseError(e.to_string()))?
+                        .map(|value| value.value().to_vec());
+                    if let Some(clan_bytes) = clan_bytes {
+                        let mut clan: Clan = serde_json::from_slice(&clan_bytes).map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                        clan.member_count = clan.member_count.saturating_sub(*removed as u32);
+                        let bytes = serde_json::to_vec(&clan).map_err(|e| WouError::Internal(e.to_string()))?;
+                        table.insert(tag.as_str(), bytes.as_slice()).map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                    }
+                }
+            }
+            {
+                let mut table = write_txn.open_table(SPIRAL_BALANCES_TABLE).map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                for key in &balance_rows { table.remove(key.as_str()).map_err(|e| WouError::DatabaseError(e.to_string()))?; }
+            }
+            {
+                let mut table = write_txn.open_table(ASSET_INSTANCES_TABLE).map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                for key in &asset_rows { table.remove(key.as_str()).map_err(|e| WouError::DatabaseError(e.to_string()))?; }
+            }
+            {
+                let mut table = write_txn.open_table(ASSET_EVENTS_TABLE).map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                for key in &asset_event_rows { table.remove(key.as_str()).map_err(|e| WouError::DatabaseError(e.to_string()))?; }
+            }
+            {
+                let mut table = write_txn.open_table(ASSET_LISTINGS_TABLE).map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                for key in &listing_rows { table.remove(key.as_str()).map_err(|e| WouError::DatabaseError(e.to_string()))?; }
+            }
+            {
+                let mut table = write_txn.open_table(TRADES_TABLE).map_err(|e| WouError::DatabaseError(e.to_string()))?;
+                for key in &trade_rows { table.remove(key.as_str()).map_err(|e| WouError::DatabaseError(e.to_string()))?; }
+            }
+            write_txn
+                .commit()
+                .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
+        }
+
+        Ok(ResetHumanAccountsReport {
+            dry_run,
+            human_accounts: human_ids.len() as u64,
+            bots_preserved,
+            redb_rows_removed,
+            redis_keys_removed: redis_keys.len() as u64,
+            redis_members_removed,
+        })
     }
 
     // =========================================================================

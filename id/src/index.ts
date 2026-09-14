@@ -14,6 +14,41 @@ export const TERMS_URL = 'https://worldofunreal.com/terms';
 // Single sender for the whole org.
 export const SENDER_EMAIL = 'no-reply@worldofunreal.com';
 
+const OAUTH_TRANSACTION_KEY = 'wou_oauth_transaction';
+
+function base64UrlEncode(bytes: Uint8Array): string {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function encodeOAuthState(value: Record<string, string>): string {
+  return base64UrlEncode(new TextEncoder().encode(JSON.stringify(value)));
+}
+
+function decodeOAuthState(raw: string): Record<string, string> {
+  let encoded = raw.replace(/-/g, '+').replace(/_/g, '/');
+  while (encoded.length % 4 !== 0) encoded += '=';
+  const binary = atob(encoded);
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  const value = JSON.parse(new TextDecoder().decode(bytes));
+  return value && typeof value === 'object' ? value : {};
+}
+
+function randomOAuthNonce(): string {
+  const bytes = new Uint8Array(24);
+  window.crypto.getRandomValues(bytes);
+  return base64UrlEncode(bytes);
+}
+
+async function createPkcePair(): Promise<{ verifier: string; challenge: string }> {
+  const verifierBytes = new Uint8Array(32);
+  window.crypto.getRandomValues(verifierBytes);
+  const verifier = base64UrlEncode(verifierBytes);
+  const digest = await window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+  return { verifier, challenge: base64UrlEncode(new Uint8Array(digest)) };
+}
+
 // Swappable transport (default: global fetch). Electron hosts inject their
 // main-process proxy here so every SDK call flows through it.
 let fetchImpl: typeof fetch = (...args) => fetch(...args);
@@ -52,6 +87,11 @@ export type AuthProvider =
 
 export type SocialProvider = 'discord' | 'google' | 'twitter' | 'meta';
 
+export interface OAuthOptions {
+  /** Exact callback registered for the application. Defaults to the hub. */
+  redirectUri?: string;
+}
+
 export interface EmbeddedWallets {
   evm_address: string;
   solana_address: string;
@@ -74,20 +114,8 @@ export interface UserProfile {
   custom_attributes?: Record<string, unknown>;
 }
 
-export interface CrossGameProfile {
-  sow_rank?: string;
-  sow_elo?: number;
-  sow_matches?: number;
-  sow_wins?: number;
-  sow_faction?: string;
-  cosmicrafts_level?: number;
-  cosmicrafts_fleet_power?: number;
-  nftropoly_net_worth?: number;
-  nftropoly_titles?: number;
-}
-
 export interface PlayerAccount {
-  id: string;
+  account_id: string;
   username: string;
   display_name: string;
   email?: string;
@@ -96,7 +124,6 @@ export interface PlayerAccount {
   clan_tag?: string;
   clan_name?: string;
   clan_role?: 'owner' | 'elder' | 'member';
-  game_stats: CrossGameProfile;
   followers_count: number;
   following_count: number;
   embedded_wallets: EmbeddedWallets;
@@ -107,7 +134,7 @@ export interface PlayerAccount {
 }
 
 export interface PlayerSearchResult {
-  id: string;
+  account_id: string;
   username: string;
   display_name: string;
   clan_tag?: string;
@@ -137,7 +164,7 @@ export interface ClanDetails {
 }
 
 export interface PublicProfile {
-  id: string;
+  account_id: string;
   username: string;
   display_name: string;
   avatar_url?: string;
@@ -149,7 +176,6 @@ export interface PublicProfile {
   following_count: number;
   clan_tag?: string;
   clan_name?: string;
-  game_stats: CrossGameProfile;
   profile?: UserProfile;
 }
 
@@ -473,7 +499,7 @@ export class WouAuthClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         email,
-        account_id: this.user?.id || null,
+        account_id: this.user?.account_id || null,
         context: context || this.defaultContext,
         newsletter_opt_in: newsletterOptIn,
       }),
@@ -513,7 +539,7 @@ export class WouAuthClient {
       body: JSON.stringify({
         email,
         code,
-        account_id: this.user?.id || null,
+        account_id: this.user?.account_id || null,
         context: typeof context === 'string' ? context : this.defaultContext,
       }),
     });
@@ -529,15 +555,18 @@ export class WouAuthClient {
   // ==========================================
 
   /**
-   * Dispatches user to OAuth Provider using the Centralized World of Unreal Identity Hub.
-   * Google/Discord will redirect to https://worldofunreal.com/auth/callback (which is 100% authorized),
-   * and the hub will redirect back to this application's current URL with the authenticated session token.
+   * Dispatches the user to OAuth through WOU-ID.
+   * The hub callback is the default. SOW may pass its pinned direct callback
+   * (`https://shadowsofwar.io/auth/callback`) to avoid a second redirect.
    *
-   * Crucial: The provider is serialized inside the `state` JSON payload to avoid domain-isolated sessionStorage loss.
+   * State and the temporary X verifier stay bound to this browser transaction.
    */
-  public loginWithOAuth(provider: SocialProvider): void {
+  public async loginWithOAuth(provider: SocialProvider, options: OAuthOptions = {}): Promise<void> {
     const returnTo = typeof window !== 'undefined' ? window.location.href : '';
-    const accountId = this.user?.id || '';
+    const accountId = this.user?.account_id || '';
+    const redirectUri = options.redirectUri || AUTH_HUB_CALLBACK_URL;
+    const nonce = randomOAuthNonce();
+    const pkce = provider === 'twitter' ? await createPkcePair() : null;
 
     if (typeof window !== 'undefined') {
       sessionStorage.setItem('wou_oauth_provider', provider);
@@ -547,45 +576,75 @@ export class WouAuthClient {
       returnTo,
       accountId,
       provider,
+      nonce,
     };
 
-    let statePayload = '';
-    try {
-      statePayload = btoa(unescape(encodeURIComponent(JSON.stringify(stateObj))))
-        .replace(/\+/g, '-')
-        .replace(/\//g, '_')
-        .replace(/=+$/, '');
-    } catch {
-      statePayload = encodeURIComponent(JSON.stringify(stateObj));
+    const statePayload = encodeOAuthState(stateObj);
+    sessionStorage.setItem(
+      OAUTH_TRANSACTION_KEY,
+      JSON.stringify({ nonce, provider, redirectUri, codeVerifier: pkce?.verifier || null }),
+    );
+    const query = new URLSearchParams({ redirect_uri: redirectUri, state: statePayload });
+    if (pkce) {
+      query.set('code_challenge', pkce.challenge);
+      query.set('code_challenge_method', 'S256');
     }
-
-    const targetUrl = `${ID_SERVER_URL}/api/v1/auth/oauth/login/${provider}?redirect_uri=${encodeURIComponent(
-      AUTH_HUB_CALLBACK_URL
-    )}&state=${encodeURIComponent(statePayload)}`;
+    const targetUrl = `${ID_SERVER_URL}/api/v1/auth/oauth/login/${provider}?${query.toString()}`;
 
     if (typeof window !== 'undefined') {
       window.location.href = targetUrl;
     }
   }
 
-  public loginWithSocial(provider: SocialProvider): void {
-    return this.loginWithOAuth(provider);
+  public loginWithSocial(provider: SocialProvider, options: OAuthOptions = {}): Promise<void> {
+    return this.loginWithOAuth(provider, options);
   }
 
-  public async handleOAuthCallback(provider: string, code: string): Promise<AuthResponse> {
+  public async handleOAuthCallback(
+    provider: string,
+    code: string,
+    options: OAuthOptions = {},
+    stateParam = ''
+  ): Promise<AuthResponse> {
+    let transaction: { nonce?: string; provider?: string; redirectUri?: string; codeVerifier?: string | null } | null = null;
+    if (typeof window !== 'undefined') {
+      try {
+        transaction = JSON.parse(sessionStorage.getItem(OAUTH_TRANSACTION_KEY) || 'null');
+      } catch {
+        transaction = null;
+      }
+    }
+    if (!stateParam || !transaction || transaction.provider !== provider) {
+      throw new Error('OAuth state is missing or expired. Please try signing in again.');
+    }
+    let stateObj: Record<string, string>;
+    try {
+      stateObj = decodeOAuthState(stateParam);
+    } catch {
+      throw new Error('OAuth state is invalid. Please try signing in again.');
+    }
+    if (!stateObj.nonce || stateObj.nonce !== transaction.nonce) {
+      throw new Error('OAuth state does not match this sign-in attempt.');
+    }
+    if (options.redirectUri && transaction.redirectUri !== options.redirectUri) {
+      throw new Error('OAuth callback does not match this sign-in attempt.');
+    }
     const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/auth/oauth/callback/${provider}`, {
       method: 'POST',
       headers: this.authHeaders(),
       body: JSON.stringify({
         code,
-        redirect_uri: AUTH_HUB_CALLBACK_URL,
-        account_id: this.user?.id || null,
+        redirect_uri: options.redirectUri || transaction.redirectUri || AUTH_HUB_CALLBACK_URL,
+        account_id: this.user?.account_id || null,
+        state: stateParam,
+        code_verifier: transaction.codeVerifier || null,
         context: this.defaultContext,
       }),
     });
 
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'OAuth authentication exchange failed.');
+    if (typeof window !== 'undefined') sessionStorage.removeItem(OAUTH_TRANSACTION_KEY);
     this.setSession(data.session_token, data.account);
     this.closeModal();
     return data;
@@ -623,7 +682,7 @@ export class WouAuthClient {
         public_address: publicAddress,
         signature,
         message: challengeData.message,
-        account_id: this.user?.id || null,
+        account_id: this.user?.account_id || null,
         context: this.defaultContext,
       }),
     });
@@ -671,7 +730,7 @@ export class WouAuthClient {
         public_address: publicAddress,
         signature: signatureHex,
         message: challengeData.message,
-        account_id: this.user?.id || null,
+        account_id: this.user?.account_id || null,
         context: this.defaultContext,
       }),
     });
@@ -714,7 +773,7 @@ export class WouAuthClient {
                 public_address: principal,
                 signature: 'ICP_DELEGATION_PROVEN',
                 message: challengeData.message,
-                account_id: this.user?.id || null,
+                account_id: this.user?.account_id || null,
                 context: this.defaultContext,
               }),
             });
@@ -776,7 +835,7 @@ export class WouAuthClient {
         public_address: credential.id,
         signature: 'PASSKEY_ASSERTION_VERIFIED',
         message: challengeData.message,
-        account_id: this.user?.id || null,
+        account_id: this.user?.account_id || null,
         context: this.defaultContext,
       }),
     });
@@ -895,9 +954,9 @@ export class WouAuthClient {
     return res.json();
   }
 
-  public async follow(id: string): Promise<void> {
+  public async follow(accountId: string): Promise<void> {
     if (!this.sessionToken) throw new Error('Authentication required to follow.');
-    const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/social/follow/${encodeURIComponent(id)}`, {
+    const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/social/follow/${encodeURIComponent(accountId)}`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${this.sessionToken}` },
     });
@@ -905,9 +964,9 @@ export class WouAuthClient {
     if (!res.ok) throw new Error(data.error || 'Failed to follow.');
   }
 
-  public async unfollow(id: string): Promise<void> {
+  public async unfollow(accountId: string): Promise<void> {
     if (!this.sessionToken) throw new Error('Authentication required to unfollow.');
-    const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/social/unfollow/${encodeURIComponent(id)}`, {
+    const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/social/unfollow/${encodeURIComponent(accountId)}`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${this.sessionToken}` },
     });
@@ -945,7 +1004,7 @@ export class WouAuthClient {
     country?: string;
   }): Promise<PlayerAccount> {
     if (!this.sessionToken || !this.user) throw new Error('Authentication required to update profile.');
-    const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/user/profile/${encodeURIComponent(this.user.id)}`, {
+    const res = await fetchImpl(`${ID_SERVER_URL}/api/v1/user/profile/${encodeURIComponent(this.user.account_id)}`, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',

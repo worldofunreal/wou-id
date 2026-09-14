@@ -9,9 +9,12 @@ import argparse
 import hashlib
 import json
 import os
+import secrets
+import shlex
 import subprocess
 import sys
 import time
+import tempfile
 import urllib.request
 from pathlib import Path
 
@@ -26,11 +29,20 @@ PROD_GROUP = os.environ.get("WOU_PROD_GROUP", "sow")
 HEALTH_URL = os.environ.get("WOU_HEALTH_URL", "https://id.worldofunreal.com/health")
 REMOTE_BUILD_DIR = "/tmp/wou-id"
 REMOTE_BIN_PATH = "/usr/local/libexec/wou-server"
+REMOTE_JAIL_BIN_PATH = "/zroot/jails/wou-id/usr/local/libexec/wou-server"
 REMOTE_ENV_PATH = "/usr/local/etc/wou-id/wou-id.env"
+REMOTE_JAIL_ENV_PATH = "/zroot/jails/wou-id/usr/local/etc/wou-id/wou-id.env"
 REMOTE_RCD_PATH = "/usr/local/etc/rc.d/wou_id"
+REMOTE_JAIL_RCD_PATH = "/zroot/jails/wou-id/usr/local/etc/rc.d/wou_id"
 REMOTE_NGINX_PATH = "/usr/local/etc/nginx/conf.d/id.worldofunreal.com.conf"
 REMOTE_DB_DIR = "/var/db/wou-id"
 REMOTE_LOG_DIR = "/var/log/wou-id"
+IDENTITY_SECRET_FILE = Path(
+    os.environ.get(
+        "WOU_SOW_IDENTITY_SECRET_FILE",
+        str(Path.home() / ".config/shadows-of-war/wou_sow_identity_secret"),
+    )
+)
 
 # --- ANSI Colors ---
 class Colors:
@@ -75,6 +87,71 @@ def run_cmd(cmd: list[str] | str, check=True, capture=False, shell=False) -> sub
 def run_ssh(host: str, cmd_str: str, check=True, capture=False) -> subprocess.CompletedProcess:
     return run_cmd(["ssh", host, cmd_str], check=check, capture=capture)
 
+
+def load_identity_secret() -> str:
+    """Load one shared bridge secret, creating it once if needed."""
+    configured = os.environ.get("WOU_SOW_IDENTITY_SECRET", "").strip()
+    stored = IDENTITY_SECRET_FILE.read_text().strip() if IDENTITY_SECRET_FILE.is_file() else ""
+    if configured and stored and configured != stored:
+        raise RuntimeError(f"WOU_SOW_IDENTITY_SECRET differs from {IDENTITY_SECRET_FILE}")
+    value = stored or configured or secrets.token_hex(32)
+    if len(value) < 32 or len(value) > 256 or any(char.isspace() for char in value):
+        raise RuntimeError("WOU_SOW_IDENTITY_SECRET must be 32-256 non-whitespace characters")
+    if not IDENTITY_SECRET_FILE.is_file():
+        IDENTITY_SECRET_FILE.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(IDENTITY_SECRET_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as handle:
+                handle.write(value)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except FileExistsError:
+            stored = IDENTITY_SECRET_FILE.read_text().strip()
+            if stored != value:
+                raise RuntimeError(f"shared secret changed while creating {IDENTITY_SECRET_FILE}")
+    os.chmod(IDENTITY_SECRET_FILE, 0o600)
+    return value
+
+
+def sync_identity_secret(secret: str):
+    """Install the bridge secret through the WOU-ID deployment path."""
+    remote_tmp = f"/tmp/wou-sow-identity-secret-{os.getpid()}"
+    with tempfile.NamedTemporaryFile(mode="w", delete=False) as handle:
+        handle.write(secret)
+        handle.flush()
+        os.fsync(handle.fileno())
+        local_tmp = handle.name
+    os.chmod(local_tmp, 0o600)
+    try:
+        run_cmd(["scp", "-q", local_tmp, f"{PROD_HOST}:{remote_tmp}"], check=True)
+        env_path = shlex.quote(REMOTE_ENV_PATH)
+        secret_path = shlex.quote(remote_tmp)
+        command = f"""set -eu
+trap 'rm -f {secret_path}' EXIT
+if sudo test -f {env_path}; then sudo cp -p {env_path} {env_path}.bak_$(date +%s); fi
+tmp=$(mktemp /tmp/wou-id-env.XXXXXX)
+if sudo test -f {env_path}; then sudo grep -v '^WOU_SOW_IDENTITY_SECRET=' {env_path} > "$tmp" || true; else : > "$tmp"; fi
+printf '%s' 'WOU_SOW_IDENTITY_SECRET=' | sudo tee -a "$tmp" >/dev/null
+sudo cat {secret_path} | sudo tee -a "$tmp" >/dev/null
+printf '\\n' | sudo tee -a "$tmp" >/dev/null
+sudo cp "$tmp" {env_path}
+sudo chown {shlex.quote(PROD_USER)}:{shlex.quote(PROD_GROUP)} {env_path}
+sudo chmod 0600 {env_path}
+rm -f "$tmp"
+sudo umount {shlex.quote(REMOTE_JAIL_ENV_PATH)}
+sudo mount -t nullfs -o ro {env_path} {shlex.quote(REMOTE_JAIL_ENV_PATH)}
+"""
+        run_ssh(PROD_HOST, command, check=True)
+        verify = run_ssh(
+            PROD_HOST,
+            f"sudo awk -F= '$1==\"WOU_SOW_IDENTITY_SECRET\" && length($2)>=32 {{print \"configured\"}}' {env_path} && sudo awk -F= '$1==\"WOU_SOW_IDENTITY_SECRET\" && length($2)>=32 {{print \"configured\"}}' {shlex.quote(REMOTE_JAIL_ENV_PATH)}",
+            capture=True,
+        )
+        if verify.stdout.splitlines() != ["configured", "configured"]:
+            raise RuntimeError("WOU-ID bridge secret was not installed")
+    finally:
+        os.unlink(local_tmp)
+
 # --- Commands ---
 
 def cmd_test(_args):
@@ -96,6 +173,7 @@ def cmd_build(_args):
         "rsync", "-avz", "--delete",
         "--exclude", "target",
         "--exclude", ".git",
+        "--exclude", "__pycache__",
         f"{ROOT_DIR}/",
         f"{BUILD_HOST}:{REMOTE_BUILD_DIR}/"
     ]
@@ -113,6 +191,7 @@ def cmd_build(_args):
 def cmd_deploy(args):
     """Execute complete end-to-end deployment pipeline."""
     start_total = time.time()
+    identity_secret = load_identity_secret()
     print(f"\n{Colors.BOLD}======================================================={Colors.RESET}")
     print(f"{Colors.BOLD}  WORLD OF UNREAL IDENTITY (wou-id) DEPLOYMENT PIPELINE{Colors.RESET}")
     print(f"{Colors.BOLD}======================================================={Colors.RESET}\n")
@@ -136,6 +215,7 @@ def cmd_deploy(args):
 
     install_bin_cmd = (
         f"sudo install -o {PROD_USER} -g {PROD_GROUP} -m 755 /tmp/wou-server {REMOTE_BIN_PATH} && "
+        f"sudo install -o {PROD_USER} -g {PROD_GROUP} -m 755 /tmp/wou-server {REMOTE_JAIL_BIN_PATH} && "
         f"rm /tmp/wou-server"
     )
     run_ssh(PROD_HOST, install_bin_cmd, check=True)
@@ -144,12 +224,27 @@ def cmd_deploy(args):
     # Step 4: Provision / Sync Configurations
     log_info("Step 4/5: Syncing versioned infrastructure configurations...")
     
-    # Sync rc.d script
-    rcd_local = DEPLOY_DIR / "wou_id.rc.d"
-    if rcd_local.exists():
-        run_cmd(f"scp {rcd_local} {PROD_HOST}:/tmp/wou_id.rc.d", shell=True, check=True)
-        run_ssh(PROD_HOST, f"sudo install -o root -g wheel -m 755 /tmp/wou_id.rc.d {REMOTE_RCD_PATH} && rm /tmp/wou_id.rc.d")
-        run_ssh(PROD_HOST, "sudo sysrc wou_id_enable=YES")
+    # The host controls the jail; the application service exists only inside it.
+    host_rcd_local = DEPLOY_DIR / "wou_id_jail.rc.d"
+    jail_rcd_local = DEPLOY_DIR / "wou_id.rc.d"
+    if host_rcd_local.exists() and jail_rcd_local.exists():
+        run_cmd(f"scp {host_rcd_local} {PROD_HOST}:/tmp/wou_id-host.rc.d", shell=True, check=True)
+        run_cmd(f"scp {jail_rcd_local} {PROD_HOST}:/tmp/wou_id-jail.rc.d", shell=True, check=True)
+        run_ssh(
+            PROD_HOST,
+            f"""set -eu
+if sudo test -f {shlex.quote(REMOTE_RCD_PATH)} && sudo grep -q 'Runs INSIDE the wou-id jail' {shlex.quote(REMOTE_RCD_PATH)}; then
+    sudo service wou_id stop
+fi
+if sudo test -f {shlex.quote(REMOTE_RCD_PATH)}; then sudo cp -p {shlex.quote(REMOTE_RCD_PATH)} {shlex.quote(REMOTE_RCD_PATH)}.bak_$(date +%s); fi
+if sudo test -f {shlex.quote(REMOTE_JAIL_RCD_PATH)}; then sudo cp -p {shlex.quote(REMOTE_JAIL_RCD_PATH)} {shlex.quote(REMOTE_JAIL_RCD_PATH)}.bak_$(date +%s); fi
+sudo install -o root -g wheel -m 755 /tmp/wou_id-host.rc.d {shlex.quote(REMOTE_RCD_PATH)}
+sudo install -o root -g wheel -m 755 /tmp/wou_id-jail.rc.d {shlex.quote(REMOTE_JAIL_RCD_PATH)}
+rm -f /tmp/wou_id-host.rc.d /tmp/wou_id-jail.rc.d
+sudo sysrc wou_id_enable=YES
+""",
+            check=True,
+        )
 
     # Sync Nginx configuration
     nginx_local = DEPLOY_DIR / "id.worldofunreal.com.conf"
@@ -157,6 +252,9 @@ def cmd_deploy(args):
         run_cmd(f"scp {nginx_local} {PROD_HOST}:/tmp/id.worldofunreal.com.conf", shell=True, check=True)
         run_ssh(PROD_HOST, f"sudo install -o root -g wheel -m 644 /tmp/id.worldofunreal.com.conf {REMOTE_NGINX_PATH} && rm /tmp/id.worldofunreal.com.conf")
         run_ssh(PROD_HOST, "sudo nginx -t && sudo service nginx reload")
+
+    log_info("Syncing the server-only SOW identity bridge secret...")
+    sync_identity_secret(identity_secret)
 
     # Step 5: Restart Service & Verify Health
     log_info("Step 5/5: Restarting service and verifying health...")

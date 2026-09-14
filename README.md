@@ -2,63 +2,44 @@
 
 ![WouID](./docs/assets/wouid-banner.webp)
 
-> **WouID — Universal, Anonymous-First, Progressive Authentication & Multi-Platform Identity Engine for World of Unreal Games & Ecosystem Products.**
+> **WouID — the identity engine behind every World of Unreal game and site.**
+> One canonical `account_id` per player, stable across login methods and
+> projects. Live at `https://id.worldofunreal.com`, running in its own jail
+> on IONOS.
 
 [![Rust 1.80+](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
 [![Stalwart Mail Engine](https://img.shields.io/badge/email-Stalwart%20v0.16%20TLS-emerald.svg)](https://stalw.art)
 
----
-
-## 🌟 Vision & Key Highlights
-
-* **Anonymous-First & Zero Friction:** Players enter the game immediately as guests with canonical bearer IDs in `localStorage`. Zero login walls on first play.
-* **Progressive OTP Registration:** When players want to save progress, claim rewards, or sync cross-platform, they link their email via a high-speed **6-digit OTP code** dispatched directly through your own **Stalwart Mail Server**.
-* **Double Opt-In & Compliance:** 100% compliant with Gmail, Yahoo, and Microsoft bulk sender requirements (DKIM RSA-2048 + Ed25519, SPF `-all`, DMARC `p=reject`, MTA-STS, and 1-Click RFC 8058 Unsubscribe).
-* **Multi-Provider Identity Linking:** A single `PlayerAccount` seamlessly bridges:
-  * 📧 **Verified Email** (Stalwart OTP)
-  * 🎮 **Web Portals** (CrazyGames, Poki, GameDistribution)
-  * 📱 **Mobile** (Google Play Services, Apple Game Center)
-  * 🌐 **Web3 Wallets** (Ethereum EIP-4361 SIWE, Solana SIWS) without slow blockchain canisters.
-* **High Performance Stack:** Built in **pure Rust**, utilizing **Valkey** for hot session caches and **Redb** for ultra-fast, zero-overhead durable embedded storage.
+The full rules live in [`docs/identity-contract.md`](docs/identity-contract.md):
+games own progression and economy under `account_id`; WOU-ID owns identity,
+sessions, verified email, and provider links. Email is a login method, never
+an account key — unverified or conflicting emails never auto-merge accounts.
 
 ---
 
-## 🏗️ Architecture & State Machine
+## 🌟 What it does
 
-```mermaid
-stateDiagram-v2
-    [*] --> Anonymous_Player: Player boots game (Zero friction)
-    
-    state Anonymous_Player {
-        [*] --> GuestSession: UUID assigned in localStorage
-        GuestSession --> Active_Gameplay: Plays matches, earns XP & gold
-    }
-    
-    Anonymous_Player --> OTP_Flow: Clicks 'Save Progress / Claim Rewards'
-    
-    state OTP_Flow {
-        OTP_Flow --> Code_Generated: Backend generates 6-digit OTP in Valkey (TTL 10m)
-        Code_Generated --> Stalwart_Dispatch: Stalwart delivers branded HTML email in < 2s
-        Stalwart_Dispatch --> Code_Entered: Player types 6 digits in modal
-    }
-    
-    Code_Entered --> Permanent_Account: OTP Validated
-    Code_Entered --> OTP_Flow: Invalid code / Retry
-    
-    state Permanent_Account {
-        Permanent_Account --> Email_Linked: Account promoted to permanent
-        Email_Linked --> Newsletter_OptIn: Auto-subscribed to game newsletter
-        Email_Linked --> Rewards_Granted: Unlocks rewards & badge
-    }
-    
-    Permanent_Account --> Cross_Platform_Link: Link Additional Platforms
-    state Cross_Platform_Link {
-        [*] --> CrazyGames: Token SDK verified
-        [*] --> Mobile: Apple / Google token verified
-        [*] --> Web3: EVM / Solana SIWE signature verified
-    }
-```
+* **Anonymous-first entry:** guests play instantly with a canonical bearer ID,
+  zero login walls. Session TTL 30d; revocation is the real control.
+* **Email OTP:** 6-digit codes via our own Stalwart mail server (DKIM + SPF
+  `-all` + DMARC `p=reject`, RFC 8058 one-click unsubscribe).
+* **Social OAuth:** Google, Discord, X, Meta/Facebook, Apple, plus Play Games
+  on the Android-native path. Callbacks pinned server-side, S256 PKCE for X.
+* **Web3:** Ethereum SIWE + Solana SIWS linking, plus identity-owned embedded
+  vault wallets (re-derived from the seed on boot migration).
+* **Web portals:** CrazyGames, Poki, GameDistribution token verification.
+* **QR login:** approve a desktop session from your phone.
+* **Bots:** Telegram webhooks + Discord interactions, linkable to accounts.
+* **Sessions:** short-lived JWTs (`jti` revocation), refresh, `/me`, logout.
+* **Public profiles:** usernames, search, player lookup, media uploads
+  (served from `id.worldofunreal.com/uploads`).
+* **Clans & social:** create/join/leave, follow graph, global feed, activity.
+* **Inventory & trades:** collect, direct trades with accept/cancel.
+* **Custodial assets + marketplace:** collections, claims, transfers,
+  freeze/restore, provenance events, listings with buy/cancel, faucet,
+  SPIRAL balances.
+* **Newsletter:** double opt-in subscribe, one-click unsubscribe.
 
 ---
 
@@ -66,72 +47,125 @@ stateDiagram-v2
 
 | Crate | Purpose |
 | :--- | :--- |
-| **[`wou-core`](crates/wou-core)** | Core domain models (`PlayerAccount`, `LinkedIdentity`, `AuthProvider`, `UserProfile`, `SessionClaims`). |
-| **[`wou-mail`](crates/wou-mail)** | Stalwart SMTP transport engine with responsive, branded HTML templates for each game domain. |
-| **[`wou-crypto`](crates/wou-crypto)** | Cryptographic tools: Secure 6-digit OTP generation, JWT token manager, SIWE (EVM), SIWS (Solana), CrazyGames verifier. |
-| **[`wou-storage`](crates/wou-storage)** | Storage backend: Hot Valkey cache (rate limits, OTPs) + Durable Redb player table with inverted identity indexes. |
-| **[`wou-server`](crates/wou-server)** | Axum REST API server, CORS handlers, route controllers, and health endpoints. |
-| **[`wou-client`](crates/wou-client)** | Universal Rust Client SDK compiling to both native and `wasm32-unknown-unknown`. |
-| **[`@worldofunreal/id`](id)** | Single TypeScript package: auth client + official sign-in modal for every frontend. |
+| **[`wou-core`](crates/wou-core)** | Domain models: `PlayerAccount`, `LinkedIdentity`, `AuthProvider`, `UserProfile`, session claims. |
+| **[`wou-mail`](crates/wou-mail)** | Stalwart SMTP transport with branded per-game HTML templates. |
+| **[`wou-crypto`](crates/wou-crypto)** | OTP generation, JWT manager, SIWE/SIWS, OAuth exchanges, CrazyGames verifier. |
+| **[`wou-storage`](crates/wou-storage)** | Valkey (hot: sessions, OTPs, rate limits) + Redb (durable player table with identity indexes). |
+| **[`wou-server`](crates/wou-server)** | Axum REST API, CORS, routes, health. Binary: `wou-server`. |
+| **[`wou-client`](crates/wou-client)** | Rust client SDK, native + `wasm32-unknown-unknown`. |
+| **[`@worldofunreal/id`](id)** | TypeScript package: auth client + official sign-in modal for every frontend. |
 
 ---
 
 ## 🚀 REST API Reference
 
-### 1. Anonymous Authentication
-```http
-POST /api/v1/auth/anonymous
-Content-Type: application/json
+Base: `https://id.worldofunreal.com`. Health: `GET /health` → `WOU-ID Online 200 OK`.
 
-{
-  "account_id": "optional-stored-uuid",
-  "display_name": "Commander_Alpha",
-  "context": "shadowsofwar"
-}
+### Auth — anonymous, OTP, sessions
+
+```http
+POST /api/v1/auth/anonymous          # boot as guest -> account_id + session
+POST /api/v1/auth/otp/request        # (alias: /otp/send) 6-digit code by email
+POST /api/v1/auth/otp/verify         # promote guest -> permanent account
+GET  /api/v1/auth/me                 # current session account
+POST /api/v1/auth/refresh            # rotate session JWT
+POST /api/v1/auth/logout             # revoke session
 ```
 
-### 2. Request OTP Verification Code
+### Auth — OAuth, QR, Web3, portals
+
 ```http
-POST /api/v1/auth/otp/request
-Content-Type: application/json
-
-{
-  "email": "player@gmail.com",
-  "account_id": "current-anon-uuid",
-  "context": "shadowsofwar",
-  "newsletter_opt_in": true
-}
-```
-
-### 3. Verify OTP & Promote Account
-```http
-POST /api/v1/auth/otp/verify
-Content-Type: application/json
-
-{
-  "email": "player@gmail.com",
-  "code": "849201",
-  "account_id": "current-anon-uuid",
-  "context": "shadowsofwar"
-}
-```
-
-### 4. Link External Provider (CrazyGames / Web3)
-```http
+GET  /api/v1/auth/oauth/config
+GET  /api/v1/auth/oauth/login/:provider      # google | discord | x | meta | apple ...
+POST /api/v1/auth/oauth/callback/:provider
+POST /api/v1/auth/qr/start
+POST /api/v1/auth/qr/:id/status
+POST /api/v1/auth/qr/:id/approve
+POST /api/v1/auth/qr/:id/cancel
+POST /api/v1/auth/web3/challenge
+POST /api/v1/auth/web3/verify
 POST /api/v1/auth/link/crazygames
 POST /api/v1/auth/link/ethereum
 POST /api/v1/auth/link/solana
 ```
 
-### 5. Newsletter 1-Click Management (RFC 8058)
+### Bots
+
+```http
+POST /api/v1/bots/link/start
+GET  /api/v1/bots/linked
+POST /api/v1/bots/link/:ns
+POST /api/v1/bots/telegram          # Telegram webhook
+POST /api/v1/bots/discord           # Discord interactions
+```
+
+### Profiles, clans, social
+
+```http
+GET  /api/v1/user/profile/:id
+PUT  /api/v1/user/profile/:id
+GET  /api/v1/user/by-username/:username
+GET  /api/v1/user/check-username/:username
+GET  /api/v1/user/search
+POST /api/v1/user/upload-media
+POST /api/v1/clans/create
+GET  /api/v1/clans/list
+GET  /api/v1/clans/:tag
+POST /api/v1/clans/:tag/join
+POST /api/v1/clans/:tag/leave
+POST /api/v1/social/follow/:target_id
+POST /api/v1/social/unfollow/:target_id
+GET  /api/v1/social/graph/:account_id
+GET  /api/v1/social/feed
+POST /api/v1/social/activity
+```
+
+### Inventory, assets, marketplace
+
+```http
+GET  /api/v1/inventory/me
+POST /api/v1/inventory/collect
+GET  /api/v1/inventory/:id
+POST /api/v1/inventory/trade
+GET  /api/v1/inventory/trades
+GET  /api/v1/inventory/trade/:id
+POST /api/v1/inventory/trade/:id/accept
+POST /api/v1/inventory/trade/:id/cancel
+GET  /api/v1/assets/collections
+POST /api/v1/assets/collections
+GET  /api/v1/assets/collections/:id/tokens
+POST /api/v1/assets/claim
+POST /api/v1/assets/transfer/:id
+POST /api/v1/assets/freeze/:id
+POST /api/v1/assets/restore/:id
+GET  /api/v1/assets/:id
+GET  /api/v1/assets/owner/:account
+GET  /api/v1/assets/:id/events
+POST /api/v1/assets/faucet
+GET  /api/v1/assets/balance/me
+GET  /api/v1/assets/listings
+POST /api/v1/assets/listings
+POST /api/v1/assets/listings/:id/cancel
+POST /api/v1/assets/listings/:id/buy
+```
+
+### Newsletter
+
 ```http
 POST /api/v1/newsletter/subscribe
 POST /api/v1/newsletter/unsubscribe
 ```
 
+### Internal (bearer-protected, never public)
+
+```http
+POST /api/v1/internal/identity/resolve
+POST /api/v1/internal/profile/reset-test-data   # dry-run by default; real reset needs exact text RESET_HUMAN_TEST_DATA
+```
+
 ---
 
-## 💻 Quickstart (TypeScript / JavaScript SDK)
+## 💻 Quickstart (TypeScript)
 
 ```typescript
 import { WouIdClient } from '@worldofunreal/id';
@@ -140,53 +174,36 @@ const auth = new WouIdClient({ baseUrl: 'https://id.worldofunreal.com' });
 
 // 1. Boot game immediately as anonymous
 const { account, session_token } = await auth.startAnonymous('shadowsofwar');
-console.log('Logged in as:', account.display_name);
 
 // 2. When player wants to save progress:
 await auth.requestOtp('player@gmail.com', 'shadowsofwar');
 
 // 3. User submits 6-digit code:
 const verified = await auth.verifyOtp('player@gmail.com', '849201', 'shadowsofwar');
-console.log('Account saved & linked to:', verified.account.email);
 ```
+
+See [`id/AGENTS_GUIDE.md`](id/AGENTS_GUIDE.md) for the frontend integration rules.
 
 ---
 
-## 💻 Quickstart (Rust WASM Client)
-
-```rust
-use wou_client::{WouClient, GameContext};
-
-let client = WouClient::new("https://id.worldofunreal.com");
-
-// Step 0: Start anonymous session
-let (account, token) = client.start_or_restore_anonymous(
-    stored_id,
-    Some("Commander".into()),
-    GameContext::ShadowsOfWar
-).await?;
-
-// Step 1: Request OTP
-client.request_otp("player@gmail.com", Some(account.id), GameContext::ShadowsOfWar, true).await?;
-
-// Step 2: Verify OTP
-let result = client.verify_otp("player@gmail.com", "849201", Some(account.id), GameContext::ShadowsOfWar).await?;
-```
-
----
-
-## 🛠️ Build & Test
+## 🛠️ Build, test, operate
 
 ```bash
-# Check all workspace crates
 cargo check --workspace
-
-# Run all unit and integration tests
 cargo test --workspace
-
-# Build production binary
 cargo build --release --bin wou-server
 ```
+
+* **Deploy:** push to `main` runs [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml)
+  (builds on FreeBSD, installs into the `wou-id` jail, syncs nginx config,
+  verifies health + jail isolation). The [`wou`](wou) Python CLI mirrors the
+  same steps for local/assisted operation — no pip dependencies.
+* **Repo config:** [`deploy/`](deploy/) holds the jail, nginx, service, and
+  env-template files. Copy `deploy/wou-id.env.template` to the env file;
+  secrets are never committed.
+* **Runtime layout (IONOS):** jail `wou-id` (`/zroot/jails/wou-id`), binary at
+  `/usr/local/libexec/wou-server`, logs at `/var/log/wou-id/server.log`,
+  nginx at `/usr/local/etc/nginx/conf.d/id.worldofunreal.com.conf`.
 
 ---
 

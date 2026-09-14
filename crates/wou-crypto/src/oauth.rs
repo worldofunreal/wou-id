@@ -7,6 +7,8 @@ pub struct OAuthUserInfo {
     pub external_id: String,
     pub display_name: Option<String>,
     pub email: Option<String>,
+    #[serde(default)]
+    pub email_verified: bool,
     pub avatar_url: Option<String>,
 }
 
@@ -29,6 +31,7 @@ impl OAuthManager {
         client_id: &str,
         redirect_uri: &str,
         state: &str,
+        code_challenge: Option<&str>,
     ) -> Result<String, WouError> {
         let redirect_encoded = urlencoding::encode(redirect_uri);
         let state_encoded = urlencoding::encode(state);
@@ -43,8 +46,13 @@ impl OAuthManager {
                 client_id, redirect_encoded, state_encoded
             )),
             AuthProvider::Twitter => Ok(format!(
-                "https://twitter.com/i/oauth2/authorize?client_id={}&redirect_uri={}&response_type=code&scope=users.read%20tweet.read&state={}&code_challenge=challenge&code_challenge_method=plain",
-                client_id, redirect_encoded, state_encoded
+                "https://twitter.com/i/oauth2/authorize?client_id={}&redirect_uri={}&response_type=code&scope=users.read%20tweet.read&state={}&code_challenge={}&code_challenge_method=S256",
+                client_id,
+                redirect_encoded,
+                state_encoded,
+                urlencoding::encode(code_challenge.ok_or_else(|| {
+                    WouError::ProviderVerificationFailed("X OAuth requires a PKCE challenge".into())
+                })?)
             )),
             AuthProvider::Meta => Ok(format!(
                 "https://www.facebook.com/v19.0/dialog/oauth?client_id={}&redirect_uri={}&state={}&scope=public_profile,email",
@@ -65,11 +73,12 @@ impl OAuthManager {
         client_id: &str,
         client_secret: &str,
         redirect_uri: &str,
+        code_verifier: Option<&str>,
     ) -> Result<OAuthUserInfo, WouError> {
         match provider {
             AuthProvider::Discord => self.exchange_discord(code, client_id, client_secret, redirect_uri).await,
             AuthProvider::Google => self.exchange_google(code, client_id, client_secret, redirect_uri).await,
-            AuthProvider::Twitter => self.exchange_twitter(code, client_id, client_secret, redirect_uri).await,
+            AuthProvider::Twitter => self.exchange_twitter(code, client_id, client_secret, redirect_uri, code_verifier).await,
             AuthProvider::Meta => self.exchange_meta(code, client_id, client_secret, redirect_uri).await,
             _ => Err(WouError::ProviderVerificationFailed(format!(
                 "Unsupported OAuth2 provider: {}",
@@ -96,6 +105,8 @@ impl OAuthManager {
             username: String,
             global_name: Option<String>,
             email: Option<String>,
+            #[serde(default)]
+            verified: bool,
             avatar: Option<String>,
         }
 
@@ -154,6 +165,7 @@ impl OAuthManager {
             external_id: user_resp.id,
             display_name: user_resp.global_name.or(Some(user_resp.username)),
             email: user_resp.email,
+            email_verified: user_resp.verified,
             avatar_url,
         })
     }
@@ -175,6 +187,8 @@ impl OAuthManager {
             sub: String,
             name: Option<String>,
             email: Option<String>,
+            #[serde(default)]
+            email_verified: bool,
             picture: Option<String>,
         }
 
@@ -229,6 +243,7 @@ impl OAuthManager {
             external_id: user_resp.sub,
             display_name: user_resp.name,
             email: user_resp.email,
+            email_verified: user_resp.email_verified,
             avatar_url: user_resp.picture,
         })
     }
@@ -239,6 +254,7 @@ impl OAuthManager {
         client_id: &str,
         client_secret: &str,
         redirect_uri: &str,
+        code_verifier: Option<&str>,
     ) -> Result<OAuthUserInfo, WouError> {
         #[derive(Deserialize)]
         struct TwitterTokenResp {
@@ -262,7 +278,9 @@ impl OAuthManager {
             ("grant_type", "authorization_code"),
             ("code", code),
             ("redirect_uri", redirect_uri),
-            ("code_verifier", "challenge"),
+            ("code_verifier", code_verifier.ok_or_else(|| {
+                WouError::ProviderVerificationFailed("X OAuth requires a PKCE verifier".into())
+            })?),
         ];
 
         let res = self
@@ -309,6 +327,7 @@ impl OAuthManager {
             external_id: user_resp.data.id,
             display_name: Some(user_resp.data.name).or(Some(user_resp.data.username)),
             email: None,
+            email_verified: false,
             avatar_url: user_resp.data.profile_image_url,
         })
     }
@@ -383,6 +402,7 @@ impl OAuthManager {
             external_id: user_resp.id,
             display_name: user_resp.name,
             email: user_resp.email,
+            email_verified: false,
             avatar_url: None,
         })
     }

@@ -12,6 +12,7 @@ fn test_oauth_authorization_url_building() {
             "123456789",
             "https://id.worldofunreal.com/auth/callback",
             "test_state_123",
+            None,
         )
         .unwrap();
 
@@ -27,6 +28,7 @@ fn test_oauth_authorization_url_building() {
             "google_client_id_999",
             "https://id.worldofunreal.com/auth/callback",
             "state_google",
+            None,
         )
         .unwrap();
 
@@ -41,11 +43,13 @@ fn test_oauth_authorization_url_building() {
             "twitter_client_id",
             "https://id.worldofunreal.com/auth/callback",
             "state_twitter",
+            Some("challenge_123"),
         )
         .unwrap();
 
     assert!(twitter_url.starts_with("https://twitter.com/i/oauth2/authorize"));
-    assert!(twitter_url.contains("code_challenge=challenge"));
+    assert!(twitter_url.contains("code_challenge=challenge_123"));
+    assert!(twitter_url.contains("code_challenge_method=S256"));
 
     // Meta URL test
     let meta_url = oauth
@@ -54,6 +58,7 @@ fn test_oauth_authorization_url_building() {
             "meta_app_id",
             "https://id.worldofunreal.com/auth/callback",
             "state_meta",
+            None,
         )
         .unwrap();
 

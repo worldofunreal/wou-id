@@ -4,6 +4,7 @@ pub mod bots;
 pub mod clan;
 pub mod guard;
 pub mod inventory;
+pub mod internal;
 pub mod link;
 pub mod newsletter;
 pub mod oauth;

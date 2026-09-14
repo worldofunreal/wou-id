@@ -21,4 +21,7 @@ pub struct AppState {
     /// Secret seed for embedded wallet derivation. Env `WOU_VAULT_SEED`
     /// (required at boot, never hardcoded, never logged).
     pub vault_seed: String,
+    /// Server-to-server secret for verified game-provider identity resolution.
+    /// Env `WOU_SOW_IDENTITY_SECRET`; unset disables the endpoint.
+    pub wou_sow_identity_secret: Option<String>,
 }
