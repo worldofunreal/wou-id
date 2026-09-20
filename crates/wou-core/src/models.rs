@@ -30,6 +30,7 @@ pub enum GameContext {
     #[default]
     ShadowsOfWar,
     Cosmicrafts,
+    Rush,
     Nftropoly,
     Darkrift,
     WorldOfUnreal,
@@ -40,6 +41,7 @@ impl GameContext {
         match self {
             Self::ShadowsOfWar => "shadowsofwar",
             Self::Cosmicrafts => "cosmicrafts",
+            Self::Rush => "rush",
             Self::Nftropoly => "nftropoly",
             Self::Darkrift => "darkrift",
             Self::WorldOfUnreal => "worldofunreal",
@@ -50,6 +52,7 @@ impl GameContext {
         match self {
             Self::ShadowsOfWar => "Shadows of War",
             Self::Cosmicrafts => "Cosmicrafts",
+            Self::Rush => "Cosmic Rush",
             Self::Nftropoly => "Nftropoly",
             Self::Darkrift => "Darkrift AI",
             Self::WorldOfUnreal => "World of Unreal",
@@ -60,6 +63,7 @@ impl GameContext {
         match self {
             Self::ShadowsOfWar => "shadowsofwar.io",
             Self::Cosmicrafts => "cosmicrafts.com",
+            Self::Rush => "rush.cosmicrafts.com",
             Self::Nftropoly => "nftropoly.com",
             Self::Darkrift => "darkrift.ai",
             Self::WorldOfUnreal => "worldofunreal.com",

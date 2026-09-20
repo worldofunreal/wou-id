@@ -11,6 +11,7 @@ pub fn render_otp_email(context: GameContext, code: &str, expires_in_minutes: u6
     let theme_color = match context {
         GameContext::ShadowsOfWar => "#e11d48", // Crimson / Red
         GameContext::Cosmicrafts => "#0284c7",  // Sci-fi Cyan / Blue
+        GameContext::Rush => "#d946ef",         // Rush Fuchsia
         GameContext::Nftropoly => "#8b5cf6",    // Cyber Violet
         GameContext::Darkrift => "#10b981",     // AI Emerald
         GameContext::WorldOfUnreal => "#f59e0b", // Gold
