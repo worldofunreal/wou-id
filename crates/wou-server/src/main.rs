@@ -217,6 +217,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/v1/internal/profile/reset-test-data",
             post(routes::internal::handle_reset_human_accounts),
         )
+        .route(
+            "/api/v1/internal/activity/record",
+            post(routes::internal::handle_record_activity_internal),
+        )
         // Web3 Direct Authentication (Solana & EVM)
         .route("/api/v1/auth/web3/challenge", post(routes::web3::handle_web3_challenge))
         .route("/api/v1/auth/web3/verify", post(routes::web3::handle_web3_verify))

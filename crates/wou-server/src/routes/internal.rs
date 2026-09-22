@@ -161,3 +161,88 @@ pub async fn handle_reset_human_accounts(
             .into_response(),
     }
 }
+
+#[derive(Deserialize)]
+pub struct RecordActivityRequest {
+    pub account_id: String,
+    pub activity_type: String,
+    pub title: String,
+    pub description: String,
+    #[serde(default)]
+    pub game: wou_core::GameContext,
+}
+
+/// Server-to-server activity recording (same trust level as identity/resolve):
+/// a game server reports a highlight event for one of its players. Bearer auth
+/// with the shared bridge secret; the feed renders by activity_type, so
+/// title/description stay free-form English fallbacks.
+pub async fn handle_record_activity_internal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<RecordActivityRequest>,
+) -> impl IntoResponse {
+    if state.wou_sow_identity_secret.is_none() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "identity bridge is not configured"})),
+        )
+            .into_response();
+    }
+    if !authorized(&headers, state.wou_sow_identity_secret.as_deref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "unauthorized"})),
+        )
+            .into_response();
+    }
+    let activity_type = payload.activity_type.trim();
+    if activity_type.is_empty()
+        || activity_type.len() > 64
+        || payload.title.trim().is_empty()
+        || payload.title.len() > 140
+        || payload.description.len() > 280
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid activity payload"})),
+        )
+            .into_response();
+    }
+    let account = match state.storage.get_account_by_id(&payload.account_id).await {
+        Ok(Some(account)) => account,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "account not found"})),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    let activity = wou_core::SocialActivity {
+        id: Uuid::new_v4().to_string(),
+        account_id: account.id.clone(),
+        username: account.username.clone(),
+        display_name: account.display_name.clone(),
+        avatar_url: account.profile.avatar_url.clone(),
+        activity_type: activity_type.to_string(),
+        title: payload.title,
+        description: payload.description,
+        game: payload.game,
+        timestamp: chrono::Utc::now().timestamp() as u64,
+    };
+    match state.storage.record_social_activity(&activity).await {
+        Ok(()) => (StatusCode::CREATED, Json(activity)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
