@@ -221,6 +221,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/v1/internal/activity/record",
             post(routes::internal::handle_record_activity_internal),
         )
+        .route(
+            "/api/v1/internal/assets/tokens",
+            post(routes::internal::handle_upsert_tokens_internal),
+        )
         // Web3 Direct Authentication (Solana & EVM)
         .route("/api/v1/auth/web3/challenge", post(routes::web3::handle_web3_challenge))
         .route("/api/v1/auth/web3/verify", post(routes::web3::handle_web3_verify))

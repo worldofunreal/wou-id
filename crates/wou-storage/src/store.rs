@@ -1912,15 +1912,39 @@ impl WouStorage {
             if Self::get_json(&read_check, ASSET_TOKENS_TABLE, &tok.id)?.is_some() {
                 return Err(WouError::TokenExists(tok.id));
             }
-            Self::put_json(&write_txn, ASSET_TOKENS_TABLE, &tok.id, &bytes)?;
-        }
-        write_txn
-            .commit()
-            .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
-        Ok(tok)
-    }
-
-    pub async fn get_token(&self, id: &str) -> Result<Option<TokenType>, WouError> {
+             Self::put_json(&write_txn, ASSET_TOKENS_TABLE, &tok.id, &bytes)?;
+         }
+         write_txn
+             .commit()
+             .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
+         Ok(tok)
+     }
+ 
+     /// Catalog maintenance: create a token or refresh its metadata in place.
+     /// For existing tokens only `metadata` changes — id, collection,
+     /// max_supply, minted and created_at stay exactly as stored. New tokens
+     /// go through the same validation as `register_token`.
+     pub async fn upsert_token(&self, tok: TokenType) -> Result<TokenType, WouError> {
+         let Some(existing) = self.get_token(&tok.id).await? else {
+             return self.register_token(tok).await;
+         };
+         let mut fresh = existing.clone();
+         fresh.metadata = tok.metadata;
+         fresh.metadata.collection = existing.collection.clone();
+         let bytes = serde_json::to_vec(&fresh)
+             .map_err(|e| WouError::Internal(format!("Token serialize failed: {e}")))?;
+         let write_txn = self
+             .redb
+             .begin_write()
+             .map_err(|e| WouError::DatabaseError(format!("Redb write txn failed: {e}")))?;
+         Self::put_json(&write_txn, ASSET_TOKENS_TABLE, &fresh.id, &bytes)?;
+         write_txn
+             .commit()
+             .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
+         Ok(fresh)
+     }
+ 
+     pub async fn get_token(&self, id: &str) -> Result<Option<TokenType>, WouError> {
         let read_txn = self
             .redb
             .begin_read()

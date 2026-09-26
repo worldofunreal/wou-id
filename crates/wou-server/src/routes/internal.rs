@@ -246,3 +246,54 @@ pub async fn handle_record_activity_internal(
             .into_response(),
     }
 }
+
+#[derive(Deserialize)]
+pub struct UpsertTokensRequest {
+    pub tokens: Vec<wou_core::TokenType>,
+}
+
+/// Bridge-only catalog maintenance: register new cards or refresh card
+/// metadata (name/description/image/attributes) on existing ones. Supply
+/// counters and owned instances are never modified. Same trust level as
+/// identity/resolve: shared bridge secret bearer, no browser session.
+pub async fn handle_upsert_tokens_internal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<UpsertTokensRequest>,
+) -> impl IntoResponse {
+    if state.wou_sow_identity_secret.is_none() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "identity bridge is not configured"})),
+        )
+            .into_response();
+    }
+    if !authorized(&headers, state.wou_sow_identity_secret.as_deref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "unauthorized"})),
+        )
+            .into_response();
+    }
+    if payload.tokens.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "tokens required"})),
+        )
+            .into_response();
+    }
+    let mut applied = Vec::with_capacity(payload.tokens.len());
+    for token in payload.tokens {
+        match state.storage.upsert_token(token).await {
+            Ok(tok) => applied.push(tok),
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": e.to_string()})),
+                )
+                    .into_response()
+            }
+        }
+    }
+    (StatusCode::OK, Json(serde_json::json!({ "tokens": applied }))).into_response()
+}
