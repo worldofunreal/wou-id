@@ -249,13 +249,16 @@ pub async fn handle_record_activity_internal(
 
 #[derive(Deserialize)]
 pub struct UpsertTokensRequest {
+    #[serde(default)]
+    pub collection: Option<wou_core::Collection>,
     pub tokens: Vec<wou_core::TokenType>,
 }
 
-/// Bridge-only catalog maintenance: register new cards or refresh card
-/// metadata (name/description/image/attributes) on existing ones. Supply
-/// counters and owned instances are never modified. Same trust level as
-/// identity/resolve: shared bridge secret bearer, no browser session.
+/// Bridge-only catalog maintenance: create a collection once (optional),
+/// then register new cards or refresh card metadata
+/// (name/description/image/attributes) on existing ones. Supply counters and
+/// owned instances are never modified. Same trust level as identity/resolve:
+/// shared bridge secret bearer, no browser session.
 pub async fn handle_upsert_tokens_internal(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -281,6 +284,15 @@ pub async fn handle_upsert_tokens_internal(
             Json(serde_json::json!({"error": "tokens required"})),
         )
             .into_response();
+    }
+    if let Some(collection) = payload.collection {
+        if let Err(e) = state.storage.ensure_collection(collection).await {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
     }
     let mut applied = Vec::with_capacity(payload.tokens.len());
     for token in payload.tokens {

@@ -1858,6 +1858,16 @@ impl WouStorage {
         Ok(col)
     }
 
+    /// Catalog maintenance: create a collection once, never overwrite.
+    /// Returns (collection, created).
+    pub async fn ensure_collection(&self, col: Collection) -> Result<(Collection, bool), WouError> {
+        if let Some(existing) = self.get_collection(&col.id).await? {
+            return Ok((existing, false));
+        }
+        let created = self.create_collection(col).await?;
+        Ok((created, true))
+    }
+
     pub async fn get_collection(&self, id: &str) -> Result<Option<Collection>, WouError> {
         let read_txn = self
             .redb
