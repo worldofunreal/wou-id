@@ -20,6 +20,7 @@ const ASSET_TOKENS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("w
 const ASSET_INSTANCES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_asset_instances");
 const ASSET_EVENTS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_asset_events");
 const SPIRAL_BALANCES_TABLE: TableDefinition<&str, u64> = TableDefinition::new("wou_spiral_balances");
+const SPIRAL_BRIDGE_OPS_TABLE: TableDefinition<&str, &str> = TableDefinition::new("wou_spiral_bridge_ops");
 const ASSET_LISTINGS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("wou_asset_listings");
 
 fn identity_index_key(provider: &AuthProvider, external_id: &str) -> String {
@@ -2368,6 +2369,82 @@ impl WouStorage {
             .commit()
             .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
         Ok(next)
+    }
+
+    /// Ionic-Swap bridge: move SPIRAL between the on-chain-backed Ionic
+    /// wallet and this game-spend pocket. `key` is caller-supplied and
+    /// idempotent: re-sending the same key returns the original balance
+    /// result without re-applying the move, so retries can never double-spend.
+    pub async fn bridge_spiral(
+        &self,
+        account: &str,
+        amount: u64,
+        credit: bool,
+        key: &str,
+    ) -> Result<u64, WouError> {
+        if amount == 0 || amount > 1_000_000 {
+            return Err(WouError::Internal("amount must be 1..1000000".into()));
+        }
+        if key.len() < 8 || key.len() > 128 {
+            return Err(WouError::Internal("key must be 8..128 chars".into()));
+        }
+        let write_txn = self
+            .redb
+            .begin_write()
+            .map_err(|e| WouError::DatabaseError(format!("Redb write txn failed: {e}")))?;
+        let outcome = {
+            let mut ops = write_txn
+                .open_table(SPIRAL_BRIDGE_OPS_TABLE)
+                .map_err(|e| WouError::DatabaseError(format!("Open bridge table failed: {e}")))?;
+            let prior: Option<u64> = {
+                match ops.get(key).map_err(|e| WouError::DatabaseError(format!("Redb bridge get failed: {e}")))?
+                {
+                    Some(prev) => Some(
+                        prev.value()
+                            .parse()
+                            .map_err(|_| WouError::DatabaseError("Corrupt bridge op".into()))?,
+                    ),
+                    None => None,
+                }
+            };
+            if let Some(balance) = prior {
+                Ok(balance)
+            } else {
+                let mut balances = write_txn
+                    .open_table(SPIRAL_BALANCES_TABLE)
+                    .map_err(|e| WouError::DatabaseError(format!("Open balances table failed: {e}")))?;
+                let cur: u64 = balances
+                    .get(account)
+                    .map_err(|e| WouError::DatabaseError(format!("Redb balance get failed: {e}")))?
+                    .map(|g| g.value())
+                    .unwrap_or(0);
+                let next = if credit {
+                    Some(cur.saturating_add(amount))
+                } else if cur >= amount {
+                    Some(cur - amount)
+                } else {
+                    None
+                };
+                match next {
+                    Some(next) => {
+                        balances
+                            .insert(account, next)
+                            .map_err(|e| WouError::DatabaseError(format!("Insert balance failed: {e}")))?;
+                        let stamp = next.to_string();
+                        ops.insert(key, stamp.as_str())
+                            .map_err(|e| WouError::DatabaseError(format!("Insert bridge op failed: {e}")))?;
+                        Ok(next)
+                    }
+                    None => Err(WouError::InsufficientBalance),
+                }
+            }
+        };
+        if outcome.is_ok() {
+            write_txn
+                .commit()
+                .map_err(|e| WouError::DatabaseError(format!("Redb commit failed: {e}")))?;
+        }
+        outcome
     }
 
     // ==========================================

@@ -197,3 +197,28 @@ async fn swap_instances_is_atomic() {
         .is_err());
     assert_eq!(storage.get_asset("genesis-001#1").await.unwrap().unwrap().owner, "bob");
 }
+
+#[tokio::test]
+async fn spiral_bridge_moves_are_idempotent_and_cannot_overdraw() {
+    let (storage, _dir) = test_storage("spiral_bridge.redb");
+    // credit from Ionic side into the pocket
+    assert_eq!(storage.bridge_spiral("alice", 70, true, "dep:aaa111").await.unwrap(), 70);
+    // same key retried: same result, no double credit
+    assert_eq!(storage.bridge_spiral("alice", 70, true, "dep:aaa111").await.unwrap(), 70);
+    assert_eq!(storage.spiral_balance("alice").await.unwrap(), 70);
+    // debit toward Ionic, idempotent too
+    assert_eq!(storage.bridge_spiral("alice", 50, false, "wd:bbb222").await.unwrap(), 20);
+    assert_eq!(storage.bridge_spiral("alice", 50, false, "wd:bbb222").await.unwrap(), 20);
+    assert_eq!(storage.spiral_balance("alice").await.unwrap(), 20);
+    // overdraw refused, no op recorded, later funds enable a fresh move
+    assert!(storage.bridge_spiral("alice", 30, false, "wd:ccc333").await.is_err());
+    assert_eq!(storage.spiral_balance("alice").await.unwrap(), 20);
+    // same key retried after success elsewhere is fine: failure consumed nothing
+    assert_eq!(storage.bridge_spiral("alice", 20, false, "wd:ccc333").await.unwrap(), 0);
+    storage.bridge_spiral("alice", 5, true, "dep:ddd444").await.unwrap();
+    assert!(storage.bridge_spiral("alice", 20, false, "wd:eee555").await.is_err());
+    assert_eq!(storage.spiral_balance("alice").await.unwrap(), 5);
+    // bad params
+    assert!(storage.bridge_spiral("alice", 0, true, "dep:fff666").await.is_err());
+    assert!(storage.bridge_spiral("alice", 5, true, "x").await.is_err());
+}

@@ -309,3 +309,73 @@ pub async fn handle_upsert_tokens_internal(
     }
     (StatusCode::OK, Json(serde_json::json!({ "tokens": applied }))).into_response()
 }
+
+// ==========================================
+// SPIRAL BRIDGE — Ionic-Swap wallet <-> game-spend pocket
+// ==========================================
+
+#[derive(Deserialize)]
+pub struct SpiralBridgeRequest {
+    account: String,
+    amount: u64,
+    /// "credit" funds the pocket (money left Ionic already); "debit"
+    /// empties it toward Ionic (Ionic credits after this returns ok).
+    dir: String,
+    key: String,
+}
+
+pub async fn handle_spiral_bridge(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<SpiralBridgeRequest>,
+) -> impl IntoResponse {
+    if state.wou_sow_identity_secret.is_none() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "identity bridge is not configured"})),
+        )
+            .into_response();
+    }
+    if !authorized(&headers, state.wou_sow_identity_secret.as_deref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "unauthorized"})),
+        )
+            .into_response();
+    }
+    let credit = match payload.dir.as_str() {
+        "credit" => true,
+        "debit" => false,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "dir must be credit or debit"})),
+            )
+                .into_response();
+        }
+    };
+    if state.storage.get_account_by_id(&payload.account).await.ok().flatten().is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "account not found"})),
+        )
+            .into_response();
+    }
+    match state.storage.bridge_spiral(&payload.account, payload.amount, credit, &payload.key).await {
+        Ok(balance) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"account": payload.account, "balance": balance, "key": payload.key})),
+        )
+            .into_response(),
+        Err(wou_core::WouError::InsufficientBalance) => (
+            StatusCode::PAYMENT_REQUIRED,
+            Json(serde_json::json!({"error": "insufficient pocket balance"})),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
