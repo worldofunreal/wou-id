@@ -25,6 +25,7 @@ pub const OAUTH_HUB_CALLBACK: &str = "https://worldofunreal.com/auth/callback";
 pub const OAUTH_GAME_CALLBACKS: &[&str] = &[
     "https://shadowsofwar.io/auth/callback",
     "https://nftropoly.com/auth/callback",
+    "https://ionicswap.com/auth/callback",
 ];
 const OAUTH_STATE_TTL_SECONDS: u64 = 600;
 
