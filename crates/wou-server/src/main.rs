@@ -168,6 +168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "https://shadowsofwar.io".parse().unwrap(),
         "https://rush.cosmicrafts.com".parse().unwrap(),
         "https://nftropoly.com".parse().unwrap(),
+        "https://ionicswap.com".parse().unwrap(),
     ];
     for o in std::env::var("WOU_CORS_ORIGINS").unwrap_or_default().split(',') {
         let o = o.trim();
