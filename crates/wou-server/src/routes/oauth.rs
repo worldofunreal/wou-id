@@ -22,7 +22,10 @@ pub const OAUTH_HUB_CALLBACK: &str = "https://worldofunreal.com/auth/callback";
 /// Direct game callbacks. To add a game: append its
 /// `https://<domain>/auth/callback` here AND register the exact same URI
 /// in the provider consoles, otherwise providers reject with redirect_uri_mismatch.
-pub const OAUTH_GAME_CALLBACKS: &[&str] = &["https://shadowsofwar.io/auth/callback"];
+pub const OAUTH_GAME_CALLBACKS: &[&str] = &[
+    "https://shadowsofwar.io/auth/callback",
+    "https://nftropoly.com/auth/callback",
+];
 const OAUTH_STATE_TTL_SECONDS: u64 = 600;
 
 #[derive(Serialize)]
